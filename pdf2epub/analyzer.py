@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 import statistics
 from collections import Counter
@@ -12,12 +13,14 @@ from .models import (
     ConversionOptions,
     DocumentResult,
     PageResult,
+    PageSelection,
     PageType,
 )
 from .ocr import OcrError, OcrProvider, create_ocr_provider
-from .text import HEADING_RE, evaluate_text, normalize_arabic
+from .text import HEADING_RE, SEVERE_TEXT_REASONS, evaluate_text, normalize_arabic
 
 Progress = Callable[[str, int, int], None]
+EPUB_IMAGE_EXTENSIONS = {"gif", "jpeg", "jpg", "png", "svg"}
 
 
 class MissingDependency(RuntimeError):
@@ -35,20 +38,62 @@ def _fitz():
         ) from exc
 
 
+def _visual_text_lines(pdf_lines: list[dict]) -> list[str]:
+    """Merge PDF word fragments that occupy the same visual baseline."""
+    rows: list[dict[str, object]] = []
+    for line in pdf_lines:
+        text = "".join(span.get("text", "") for span in line.get("spans", [])).strip()
+        if not text:
+            continue
+        x0, y0, _x1, y1 = line.get("bbox", (0, 0, 0, 0))
+        height = max(float(y1) - float(y0), 1.0)
+        center = (float(y0) + float(y1)) / 2
+        row = next(
+            (
+                candidate
+                for candidate in rows
+                if abs(center - float(candidate["center"]))
+                <= max(height, float(candidate["height"])) * 0.35
+            ),
+            None,
+        )
+        if row is None:
+            rows.append(
+                {
+                    "center": center,
+                    "height": height,
+                    "pieces": [(float(x0), text)],
+                }
+            )
+        else:
+            pieces = row["pieces"]
+            assert isinstance(pieces, list)
+            pieces.append((float(x0), text))
+            count = len(pieces)
+            row["center"] = (float(row["center"]) * (count - 1) + center) / count
+            row["height"] = max(float(row["height"]), height)
+
+    output: list[str] = []
+    for row in sorted(rows, key=lambda item: float(item["center"])):
+        pieces = row["pieces"]
+        assert isinstance(pieces, list)
+        # PyMuPDF preserves the PDF's content order, which is the safest order for
+        # Arabic text containing occasional Latin fragments.
+        output.append(" ".join(text for _x0, text in pieces))
+    return output
+
+
 def _raw_blocks(page) -> list[Block]:
     blocks: list[Block] = []
     data = page.get_text("dict", sort=False)
     for item in data.get("blocks", []):
         if item.get("type") != 0:
             continue
-        lines: list[str] = []
+        lines = _visual_text_lines(item.get("lines", []))
         sizes: list[float] = []
         bold = False
         for line in item.get("lines", []):
             spans = line.get("spans", [])
-            line_text = "".join(span.get("text", "") for span in spans).strip()
-            if line_text:
-                lines.append(line_text)
             sizes.extend(
                 float(span.get("size", 12))
                 for span in spans
@@ -141,6 +186,47 @@ def _classify_structure(
             )
 
 
+def _merge_paragraph_lines(blocks: list[Block]) -> None:
+    """Turn consecutive PDF line boxes into reflowable prose paragraphs."""
+    paragraphs = [block for block in blocks if block.type == BlockType.PARAGRAPH]
+    if len(paragraphs) < 2:
+        return
+    widths = [block.bbox[2] - block.bbox[0] for block in paragraphs]
+    heights = [block.bbox[3] - block.bbox[1] for block in paragraphs]
+    typical_width = statistics.median(widths)
+    typical_height = max(statistics.median(heights), 1.0)
+    merged: list[Block] = []
+    last_line: Block | None = None
+    for block in blocks:
+        previous = merged[-1] if merged else None
+        if (
+            previous is not None
+            and last_line is not None
+            and all(
+                (
+                    previous.type == BlockType.PARAGRAPH,
+                    block.type == BlockType.PARAGRAPH,
+                    last_line.type == BlockType.PARAGRAPH,
+                    last_line.bbox[2] - last_line.bbox[0] >= typical_width * 0.72,
+                    -typical_height * 0.2
+                    <= block.bbox[1] - last_line.bbox[3]
+                    <= typical_height * 0.75,
+                )
+            )
+        ):
+            previous.text = f"{previous.text.rstrip()} {block.text.lstrip()}"
+            previous.bbox = (
+                min(previous.bbox[0], block.bbox[0]),
+                min(previous.bbox[1], block.bbox[1]),
+                max(previous.bbox[2], block.bbox[2]),
+                max(previous.bbox[3], block.bbox[3]),
+            )
+        else:
+            merged.append(block)
+        last_line = block
+    blocks[:] = merged
+
+
 def _remove_repeated_margins(document: DocumentResult) -> None:
     if len(document.pages) < 4:
         return
@@ -191,22 +277,89 @@ def _ocr_page(
         if result.confidence is not None
         else evaluate_text(text).score
     )
+    blocks = [
+        Block(
+            BlockType.PARAGRAPH,
+            normalize_arabic(region.text),
+            tuple(coordinate / scale for coordinate in region.bbox),
+            region.confidence if region.confidence is not None else block_confidence,
+            source=f"ocr:{result.provider}",
+        )
+        for region in result.regions
+        if region.text.strip()
+    ]
+    if not blocks and text:
+        blocks = [
+            Block(
+                BlockType.PARAGRAPH,
+                text,
+                (0, 0, page.rect.width, page.rect.height),
+                block_confidence,
+                source=f"ocr:{result.provider}",
+            )
+        ]
     return (
-        (
-            [
-                Block(
-                    BlockType.PARAGRAPH,
-                    text,
-                    (0, 0, page.rect.width, page.rect.height),
-                    block_confidence,
-                    source=f"ocr:{result.provider}",
-                )
-            ]
-            if text
-            else []
-        ),
+        blocks,
         result.confidence,
         result.provider,
+    )
+
+
+def _has_severe_text_issue(blocks: list[Block]) -> bool:
+    return any(
+        SEVERE_TEXT_REASONS.intersection(evaluate_text(block.text).reasons)
+        for block in blocks
+        if block.text.strip()
+    )
+
+
+def _save_epub_image(doc, xref: int, image_dir: Path, basename: str) -> Path:
+    extracted = doc.extract_image(xref)
+    extension = extracted["ext"].lower()
+    data = extracted["image"]
+    if extension in EPUB_IMAGE_EXTENSIONS:
+        target = image_dir / f"{basename}.{extension}"
+        target.write_bytes(data)
+        return target
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGB")
+            target = image_dir / f"{basename}.png"
+            image.save(target, format="PNG", optimize=True)
+            return target
+    except Exception:  # noqa: BLE001 - PyMuPDF is the fallback decoder
+        fitz = _fitz()
+        pixmap = fitz.Pixmap(doc, xref)
+        if pixmap.colorspace and pixmap.colorspace.n > 3:
+            pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+        target = image_dir / f"{basename}.png"
+        target.write_bytes(pixmap.tobytes("png"))
+        return target
+
+
+def _is_safe_figure_image(
+    page, xref: int, total_image_area: float, page_area: float
+) -> bool:
+    """Allow genuine figures while rejecting page scans and tiled page rasters."""
+    if total_image_area >= page_area * 0.55:
+        return False
+    try:
+        rects = page.get_image_rects(xref)
+    except Exception:  # noqa: BLE001 - uncertain placement must not leak a PDF page
+        return False
+    if not rects:
+        return False
+    own_area = sum(max(rect.width, 0) * max(rect.height, 0) for rect in rects)
+    if own_area >= page_area * 0.28:
+        return False
+    page_width = max(page.rect.width, 1)
+    page_height = max(page.rect.height, 1)
+    return not any(
+        rect.width >= page_width * 0.72 or rect.height >= page_height * 0.52
+        for rect in rects
     )
 
 
@@ -228,6 +381,8 @@ def analyze_pdf(
         blocks = _raw_blocks(page)
         embedded = "\n".join(b.text for b in blocks)
         quality = evaluate_text(embedded)
+        embedded_blocks = blocks
+        embedded_has_severe_issue = _has_severe_text_issue(embedded_blocks)
         images = page.get_images(full=True)
         page_area = max(page.rect.width * page.rect.height, 1)
         image_area = 0.0
@@ -241,60 +396,154 @@ def analyze_pdf(
         image_heavy = bool(images and image_area > page_area * 0.35)
         source = "embedded_text"
         kind = PageType.TEXT
-        use_ocr = (
+        selection = PageSelection.EMBEDDED
+        selection_reason = "Embedded text passed the quality policy"
+        candidate_scores = {"embedded_text": quality.score}
+        candidates = {
+            "embedded_text": {
+                "text": embedded,
+                "score": quality.score,
+                "reasons": quality.reasons,
+            }
+        }
+        selected_quality = quality
+        try:
+            intentional_blank = (
+                options.mode != "force_ocr"
+                and not embedded
+                and not images
+                and not page.get_drawings()
+            )
+        except Exception:  # noqa: BLE001 - malformed drawing streams are not blank proof
+            intentional_blank = False
+        use_ocr = not intentional_blank and (
             options.mode == "force_ocr"
             or not embedded
             or (
                 options.mode == "automatic"
                 and options.ocr_bad_pages
-                and quality.score < options.acceptable_threshold
+                and (
+                    quality.score < options.acceptable_threshold
+                    or embedded_has_severe_issue
+                )
             )
         )
         warnings: list[str] = []
         ocr_confidence = None
-        if use_ocr:
+        if intentional_blank:
+            blocks = []
+            source = "intentional_blank"
+            kind = PageType.TEXT
+            selection = PageSelection.INTENTIONAL_BLANK
+            selection_reason = "No text, images, or vector drawings were present"
+        elif use_ocr:
             try:
                 if ocr_provider is None:
                     ocr_provider = create_ocr_provider(options.ocr_provider)
-                blocks, ocr_confidence, provider_name = _ocr_page(
+                ocr_blocks, ocr_confidence, provider_name = _ocr_page(
                     page, options.render_dpi, options.ocr_language, ocr_provider
                 )
-                source = f"ocr:{provider_name}"
-                kind = PageType.SCAN if not embedded else PageType.BROKEN_TEXT
+                ocr_text = "\n".join(block.text for block in ocr_blocks)
+                ocr_quality = evaluate_text(ocr_text)
+                candidate_scores[f"ocr:{provider_name}"] = ocr_quality.score
+                candidates[f"ocr:{provider_name}"] = {
+                    "text": ocr_text,
+                    "score": ocr_quality.score,
+                    "reasons": ocr_quality.reasons,
+                    "confidence": ocr_confidence,
+                }
+                ocr_has_severe_issue = _has_severe_text_issue(ocr_blocks)
+                choose_ocr = bool(ocr_blocks) and (
+                    options.mode == "force_ocr"
+                    or (
+                        not embedded
+                        and not ocr_has_severe_issue
+                        and ocr_quality.score >= options.acceptable_threshold
+                    )
+                    or (
+                        embedded_has_severe_issue
+                        and not ocr_has_severe_issue
+                        and ocr_quality.score >= options.acceptable_threshold
+                    )
+                    or ocr_quality.score >= quality.score + 0.08
+                )
+                if choose_ocr:
+                    blocks = ocr_blocks
+                    selected_quality = ocr_quality
+                    source = f"ocr:{provider_name}"
+                    kind = PageType.SCAN if not embedded else PageType.BROKEN_TEXT
+                    selection = PageSelection.OCR
+                    selection_reason = (
+                        "OCR was the only usable candidate"
+                        if not embedded
+                        else "OCR passed quality checks that embedded text failed"
+                    )
+                elif embedded:
+                    blocks = embedded_blocks
+                    source = "embedded_text"
+                    kind = PageType.BROKEN_TEXT
+                    selection = PageSelection.REVIEW
+                    selection_reason = "OCR did not provide a clearly safer candidate"
+                    warnings.append(
+                        "Embedded and OCR candidates require review; retained embedded text"
+                    )
+                else:
+                    blocks = []
+                    source = "unavailable"
+                    kind = PageType.SCAN
+                    selection = PageSelection.UNAVAILABLE
+                    selection_reason = "OCR returned no usable text"
+                    warnings.append("OCR returned no usable text")
             except (MissingDependency, OcrError) as exc:
                 if embedded:
+                    blocks = embedded_blocks
                     warnings.append(
                         f"OCR unavailable; retained low-quality embedded text: {exc}"
                     )
                     kind = PageType.BROKEN_TEXT
+                    selection = PageSelection.REVIEW
+                    selection_reason = (
+                        "OCR was unavailable for questionable embedded text"
+                    )
                 else:
                     warnings.append(str(exc))
                     blocks = []
                     source = "unavailable"
                     kind = PageType.SCAN
+                    selection = PageSelection.UNAVAILABLE
+                    selection_reason = "No embedded text and OCR was unavailable"
         elif quality.score < options.good_threshold:
             kind = PageType.BROKEN_TEXT
+            selection = PageSelection.REVIEW
+            selection_reason = "Embedded text is below the good-quality threshold"
             warnings.append("Embedded text is only moderately reliable")
         elif image_heavy:
             kind = PageType.HYBRID if embedded else PageType.IMAGE_HEAVY
         blocks = _reading_order(blocks, page.rect.width)
         _classify_structure(blocks, page.rect.height, options)
-        if options.preserve_images:
+        _merge_paragraph_lines(blocks)
+        if options.preserve_images and selection in {
+            PageSelection.EMBEDDED,
+            PageSelection.REVIEW,
+        }:
             for image_index, info in enumerate(images):
                 try:
+                    if not _is_safe_figure_image(page, info[0], image_area, page_area):
+                        continue
                     extracted = doc.extract_image(info[0])
                     if len(extracted["image"]) < 4096:
                         continue
-                    filename = (
-                        f"page-{index + 1:04d}-{image_index + 1}.{extracted['ext']}"
+                    target = _save_epub_image(
+                        doc,
+                        info[0],
+                        image_dir,
+                        f"page-{index + 1:04d}-{image_index + 1}",
                     )
-                    target = image_dir / filename
-                    target.write_bytes(extracted["image"])
                     result.images.append(target)
                     blocks.append(
                         Block(
                             BlockType.IMAGE,
-                            image_path=filename,
+                            image_path=target.name,
                             source="embedded_image",
                         )
                     )
@@ -311,9 +560,13 @@ def analyze_pdf(
                 page.rect.height,
                 page.rotation,
                 blocks,
-                quality,
+                selected_quality,
                 ocr_confidence,
                 warnings,
+                selection,
+                selection_reason,
+                candidate_scores,
+                candidates,
             )
         )
     _remove_repeated_margins(result)

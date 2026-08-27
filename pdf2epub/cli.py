@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .models import ConversionOptions
+from .ocr import provider_names
 from .pipeline import convert
 
 
@@ -18,7 +19,7 @@ def main() -> None:
     parser.add_argument("--ocr-language", default="ara+eng")
     parser.add_argument(
         "--ocr-provider",
-        choices=("tesseract", "ollama", "openai_compatible"),
+        choices=provider_names(),
         default="tesseract",
     )
     args = parser.parse_args()

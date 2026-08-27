@@ -16,6 +16,17 @@ LTR_RE = re.compile(
     r"\b\d+(?:[.:/-]\d+)+\b)"
 )
 INVISIBLE_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
+HAMZA_FORMS = frozenset("ءؤئأإآ")
+NORMAL_PUNCTUATION = frozenset("،؛؟.!,:()[]{}\"'«»…ـ-–—/\\+%٪=*_#@&؛؟")
+SEVERE_TEXT_REASONS = frozenset(
+    {
+        "replacement characters",
+        "disconnected Arabic letters",
+        "probable visual-order/reversed Arabic",
+        "improbable Arabic glyph density",
+        "unexpected symbol noise",
+    }
+)
 
 
 def evaluate_text(text: str) -> TextQuality:
@@ -26,6 +37,15 @@ def evaluate_text(text: str) -> TextQuality:
     replacements = sum(c in "\ufffd�" for c in visible)
     words = WORD_RE.findall(text)
     singles = sum(len(word) == 1 for word in words)
+    arabic_chars = [c for c in visible if ARABIC_RE.match(c)]
+    hamza_ratio = sum(c in HAMZA_FORMS for c in arabic_chars) / max(
+        len(arabic_chars), 1
+    )
+    unexpected_symbols = sum(
+        not c.isalnum() and not ARABIC_RE.match(c) and c not in NORMAL_PUNCTUATION
+        for c in visible
+    )
+    unexpected_symbol_ratio = unexpected_symbols / len(visible)
     spaced_arabic = bool(re.search(r"(?:[\u0600-\u06ff]\s){4,}[\u0600-\u06ff]", text))
     probable_visual_order = any(
         HEADING_RE.match(line[::-1].strip())
@@ -49,6 +69,11 @@ def evaluate_text(text: str) -> TextQuality:
         score -= 0.35
     if probable_visual_order:
         score -= 0.4
+    improbable_glyph_density = len(arabic_chars) >= 8 and hamza_ratio > 0.16
+    if improbable_glyph_density:
+        score -= 0.4
+    if unexpected_symbol_ratio > 0.035:
+        score -= min(0.4, unexpected_symbol_ratio * 3)
     reasons: list[str] = []
     if replacement_ratio > 0.01:
         reasons.append("replacement characters")
@@ -58,15 +83,20 @@ def evaluate_text(text: str) -> TextQuality:
         reasons.append("disconnected Arabic letters")
     if probable_visual_order:
         reasons.append("probable visual-order/reversed Arabic")
+    if improbable_glyph_density:
+        reasons.append("improbable Arabic glyph density")
+    if unexpected_symbol_ratio > 0.035:
+        reasons.append("unexpected symbol noise")
     if arabic_ratio < 0.12 and arabic:
         reasons.append("low Arabic character ratio")
     return TextQuality(
-        max(0.0, min(score, 1.0)),
-        arabic_ratio,
-        replacement_ratio,
-        single_ratio,
-        spaced_arabic,
-        reasons,
+        score=max(0.0, min(score, 1.0)),
+        arabic_ratio=arabic_ratio,
+        replacement_ratio=replacement_ratio,
+        single_char_ratio=single_ratio,
+        suspicious_spacing=spaced_arabic,
+        reasons=reasons,
+        suspicious_glyph_ratio=max(hamza_ratio, unexpected_symbol_ratio),
     )
 
 

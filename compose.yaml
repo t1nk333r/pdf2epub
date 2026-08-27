@@ -1,0 +1,26 @@
+services:
+  pdf2epub:
+    build:
+      context: .
+    image: arabic-pdf2epub:0.3.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PDF2EPUB_PORT:-8000}:8000"
+    environment:
+      PDF2EPUB_OLLAMA_BASE_URL: "${PDF2EPUB_OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      PDF2EPUB_OLLAMA_MODEL: "${PDF2EPUB_OLLAMA_MODEL:-qwen3.5:27b}"
+      PDF2EPUB_OLLAMA_API_KEY: "${PDF2EPUB_OLLAMA_API_KEY:-}"
+      PDF2EPUB_MISTRAL_BASE_URL: "${PDF2EPUB_MISTRAL_BASE_URL:-https://api.mistral.ai/v1}"
+      PDF2EPUB_MISTRAL_MODEL: "${PDF2EPUB_MISTRAL_MODEL:-mistral-ocr-latest}"
+      PDF2EPUB_MISTRAL_API_KEY: "${PDF2EPUB_MISTRAL_API_KEY:-}"
+      PDF2EPUB_VISION_BASE_URL: "${PDF2EPUB_VISION_BASE_URL:-}"
+      PDF2EPUB_VISION_MODEL: "${PDF2EPUB_VISION_MODEL:-}"
+      PDF2EPUB_VISION_API_KEY: "${PDF2EPUB_VISION_API_KEY:-}"
+      PDF2EPUB_OCR_TIMEOUT: "${PDF2EPUB_OCR_TIMEOUT:-120}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - pdf2epub_data:/data
+
+volumes:
+  pdf2epub_data:

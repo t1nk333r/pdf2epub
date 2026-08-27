@@ -14,6 +14,14 @@ class PageType(StrEnum):
     IMAGE_HEAVY = "IMAGE_HEAVY"
 
 
+class PageSelection(StrEnum):
+    EMBEDDED = "embedded"
+    OCR = "ocr"
+    REVIEW = "review"
+    UNAVAILABLE = "unavailable"
+    INTENTIONAL_BLANK = "intentional_blank"
+
+
 class BlockType(StrEnum):
     HEADING = "heading"
     PARAGRAPH = "paragraph"
@@ -31,6 +39,7 @@ class TextQuality:
     single_char_ratio: float = 0.0
     suspicious_spacing: bool = False
     reasons: list[str] = field(default_factory=list)
+    suspicious_glyph_ratio: float = 0.0
 
 
 @dataclass(slots=True)
@@ -57,6 +66,10 @@ class PageResult:
     quality: TextQuality = field(default_factory=TextQuality)
     ocr_confidence: float | None = None
     warnings: list[str] = field(default_factory=list)
+    selection: PageSelection = PageSelection.EMBEDDED
+    selection_reason: str = ""
+    candidate_scores: dict[str, float] = field(default_factory=dict)
+    candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -85,7 +98,16 @@ class DocumentResult:
                 headings += block.type == BlockType.HEADING
                 images += block.type == BlockType.IMAGE
                 footnotes += block.type == BlockType.FOOTNOTE
+        unavailable = [
+            page.page
+            for page in self.pages
+            if page.selection == PageSelection.UNAVAILABLE
+        ]
+        review = [
+            page.page for page in self.pages if page.selection == PageSelection.REVIEW
+        ]
         return {
+            "schema_version": 2,
             "pages": len(self.pages),
             "page_types": types,
             "sources": sources,
@@ -97,6 +119,13 @@ class DocumentResult:
             "images_preserved": images,
             "footnotes_detected": footnotes,
             "warnings": self.warnings,
+            "integrity": {
+                "status": "failed"
+                if unavailable
+                else ("review" if review else "passed"),
+                "unavailable_pages": unavailable,
+                "review_pages": review,
+            },
             "page_details": [asdict(p) for p in self.pages],
         }
 
@@ -114,3 +143,5 @@ class ConversionOptions:
     render_dpi: int = 300
     good_threshold: float = 0.68
     acceptable_threshold: float = 0.48
+    allow_partial: bool = False
+    require_epubcheck: bool = True

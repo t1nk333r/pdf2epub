@@ -18,6 +18,12 @@ def test_reversed_heading_is_suspicious():
     assert quality.score < 0.68
 
 
+def test_arabic_looking_gibberish_with_improbable_glyph_density_is_rejected():
+    quality = evaluate_text("ائوضؤع اتمضؤة")
+    assert "improbable Arabic glyph density" in quality.reasons
+    assert quality.score < 0.48
+
+
 def test_normalization_is_conservative():
     assert normalize_arabic("  أُسامة   يحيى \n\n\n ١٢٣ ") == "أُسامة يحيى\n\n١٢٣"
 

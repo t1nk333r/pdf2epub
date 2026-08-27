@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+jar_path=$(find /opt/epubcheck -maxdepth 2 -type f -name epubcheck.jar -print -quit)
+if [ -z "$jar_path" ]; then
+    echo "EPUBCheck jar not found" >&2
+    exit 127
+fi
+exec java -jar "$jar_path" "$@"
