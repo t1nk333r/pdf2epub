@@ -24,6 +24,21 @@ pipeline {
             }
         }
 
+        stage('Test Python 3.14') {
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+            steps {
+                sh '''
+                    docker run --rm \
+                        --volume "$PWD:/src:ro" \
+                        --workdir /src \
+                        python:3.14-slim \
+                        sh -c "cp -R /src /tmp/project && cd /tmp/project && pip install '.[dev]' && pytest -q && ruff check ."
+                '''
+            }
+        }
+
         stage('Build Image') {
             steps {
                 sh 'docker build --pull --tag "$IMAGE_REF" .'
