@@ -43,6 +43,7 @@ def test_ollama_sends_native_vision_request(monkeypatch):
     assert captured["url"] == "http://localhost:11434/api/chat"
     assert captured["body"]["stream"] is False
     assert captured["body"]["think"] is False
+    assert captured["body"]["options"]["num_ctx"] == 4096
     assert captured["body"]["messages"][0]["images"] == [
         base64.b64encode(b"png-data").decode()
     ]

@@ -39,6 +39,13 @@ SETTING_DEFINITIONS = (
         placeholder="اختياري للخادم المحلي",
     ),
     SettingDefinition(
+        "PDF2EPUB_OLLAMA_NUM_CTX",
+        "حجم سياق Ollama",
+        "Ollama — محلي أو سحابي",
+        default="4096",
+        placeholder="4096",
+    ),
+    SettingDefinition(
         "PDF2EPUB_MISTRAL_BASE_URL",
         "عنوان Mistral API",
         "Mistral Document OCR",
@@ -118,6 +125,16 @@ def _validate_value(definition: SettingDefinition, value: str) -> str:
         if not 1 <= timeout <= 900:
             raise ValueError("PDF2EPUB_OCR_TIMEOUT must be between 1 and 900")
         value = str(timeout).removesuffix(".0")
+    if definition.key == "PDF2EPUB_OLLAMA_NUM_CTX":
+        try:
+            num_ctx = int(value)
+        except ValueError as exc:
+            raise ValueError("PDF2EPUB_OLLAMA_NUM_CTX must be an integer") from exc
+        if not 512 <= num_ctx <= 32768:
+            raise ValueError(
+                "PDF2EPUB_OLLAMA_NUM_CTX must be between 512 and 32768"
+            )
+        value = str(num_ctx)
     return value
 
 

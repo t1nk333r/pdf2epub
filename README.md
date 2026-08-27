@@ -106,6 +106,7 @@ Use any Ollama vision model capable of accurately reading Arabic pages. For a lo
 ```bash
 export PDF2EPUB_OLLAMA_BASE_URL=http://127.0.0.1:11434
 export PDF2EPUB_OLLAMA_MODEL=qwen3.5:27b
+export PDF2EPUB_OLLAMA_NUM_CTX=4096
 uvicorn pdf2epub.web:app
 ```
 
@@ -119,6 +120,8 @@ export PDF2EPUB_OLLAMA_API_KEY=your-token
 
 The adapter calls Ollama's native `/api/chat` endpoint with a base64 PNG,
 non-streaming output, and thinking disabled so OCR returns only the transcription.
+It defaults to a 4096-token context to leave VRAM available for the vision projector;
+increase `PDF2EPUB_OLLAMA_NUM_CTX` only when the GPU has enough free memory.
 The `qwen3.5:27b` default is intended for a 24 GB GPU; override it for smaller
 or larger hardware.
 

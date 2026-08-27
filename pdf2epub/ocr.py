@@ -56,6 +56,7 @@ class OcrSettings:
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:27b"
     ollama_api_key: str | None = None
+    ollama_num_ctx: int = 4096
     vision_base_url: str | None = None
     vision_model: str | None = None
     vision_api_key: str | None = None
@@ -67,10 +68,17 @@ class OcrSettings:
     @classmethod
     def from_env(cls) -> OcrSettings:
         raw_timeout = setting_value("PDF2EPUB_OCR_TIMEOUT", "120") or "120"
+        raw_ollama_num_ctx = (
+            setting_value("PDF2EPUB_OLLAMA_NUM_CTX", "4096") or "4096"
+        )
         try:
             timeout = float(raw_timeout)
         except ValueError:
             timeout = 120.0
+        try:
+            ollama_num_ctx = int(raw_ollama_num_ctx)
+        except ValueError:
+            ollama_num_ctx = 4096
         return cls(
             ollama_base_url=(
                 setting_value("PDF2EPUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -79,6 +87,7 @@ class OcrSettings:
             ollama_model=setting_value("PDF2EPUB_OLLAMA_MODEL", "qwen3.5:27b")
             or "qwen3.5:27b",
             ollama_api_key=setting_value("PDF2EPUB_OLLAMA_API_KEY") or None,
+            ollama_num_ctx=max(512, min(ollama_num_ctx, 32768)),
             vision_base_url=(setting_value("PDF2EPUB_VISION_BASE_URL") or "").rstrip(
                 "/"
             )
@@ -223,6 +232,7 @@ class OllamaVisionOcrProvider:
     model: str
     api_key: str | None = None
     timeout: float = 120.0
+    num_ctx: int = 4096
     name: str = "ollama"
 
     def recognize(self, image_png: bytes, language: str) -> OcrResult:
@@ -237,7 +247,7 @@ class OllamaVisionOcrProvider:
                 "messages": [
                     {"role": "user", "content": OCR_PROMPT, "images": [encoded]}
                 ],
-                "options": {"temperature": 0},
+                "options": {"temperature": 0, "num_ctx": self.num_ctx},
             },
             headers,
             self.timeout,
@@ -394,6 +404,7 @@ def _ollama_factory(settings: OcrSettings) -> OcrProvider:
         settings.ollama_model,
         settings.ollama_api_key,
         settings.timeout_seconds,
+        settings.ollama_num_ctx,
     )
 
 

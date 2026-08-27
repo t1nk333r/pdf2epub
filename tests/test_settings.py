@@ -55,6 +55,8 @@ def test_secrets_are_never_returned(monkeypatch):
         ("PDF2EPUB_OLLAMA_BASE_URL", "file:///tmp/socket"),
         ("PDF2EPUB_OCR_TIMEOUT", "0"),
         ("PDF2EPUB_OCR_TIMEOUT", "901"),
+        ("PDF2EPUB_OLLAMA_NUM_CTX", "511"),
+        ("PDF2EPUB_OLLAMA_NUM_CTX", "not-a-number"),
     ],
 )
 def test_invalid_settings_are_rejected(key, value):
