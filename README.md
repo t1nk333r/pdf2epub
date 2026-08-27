@@ -99,31 +99,30 @@ This remains the default:
 pdf2epub book.pdf --ocr-provider tesseract
 ```
 
-### Local or cloud Ollama
+### Ollama Arabic vision OCR
 
-Use any Ollama vision model capable of accurately reading Arabic pages. For a local Ollama instance:
+The Ollama adapter is restricted to the tested non-thinking models. For the local server:
 
 ```bash
-export PDF2EPUB_OLLAMA_BASE_URL=http://127.0.0.1:11434
-export PDF2EPUB_OLLAMA_MODEL=qwen3.5:27b
-export PDF2EPUB_OLLAMA_NUM_CTX=4096
+export PDF2EPUB_OLLAMA_BASE_URL=http://192.168.100.19:11435
+export PDF2EPUB_OLLAMA_MODEL=qwen3-vl:32b-instruct-gpu
+export PDF2EPUB_OLLAMA_NUM_CTX=8192
+export PDF2EPUB_OCR_TIMEOUT=300
 uvicorn pdf2epub.web:app
 ```
 
-For Ollama cloud, set its API base URL and token:
+The per-book selector offers:
 
-```bash
-export PDF2EPUB_OLLAMA_BASE_URL=https://ollama.com
-export PDF2EPUB_OLLAMA_MODEL=your-vision-model
-export PDF2EPUB_OLLAMA_API_KEY=your-token
-```
+- `qwen3-vl:32b-instruct-gpu` — quality default
+- `qwen3-vl:30b-instruct-gpu` — fast
+- `qwen3.8:27b-q4_K_M` — lower-VRAM alternative
 
-The adapter calls Ollama's native `/api/chat` endpoint with a base64 PNG,
-non-streaming output, and thinking disabled so OCR returns only the transcription.
-It defaults to a 4096-token context to leave VRAM available for the vision projector;
-increase `PDF2EPUB_OLLAMA_NUM_CTX` only when the GPU has enough free memory.
-The `qwen3.5:27b` default is intended for a 24 GB GPU; override it for smaller
-or larger hardware.
+Each page is resized to a grayscale 1280 px JPEG and sent in its own stateless
+`/api/chat` request. The adapter uses an 8K context (up to 16K only for Qwen3.8),
+disables thinking, serializes requests, and retries HTTP 5xx/connection resets.
+Suspicious output from the fast or alternative model is re-run with the 32B
+instruct model. Per-attempt token counts, duration, retries, and fallback reason
+are written to the live log and quality report.
 
 ### Hosted OpenAI-compatible vision APIs
 
@@ -133,7 +132,7 @@ This adapter works with online model services exposing the `POST /chat/completio
 export PDF2EPUB_VISION_BASE_URL=https://provider.example/v1
 export PDF2EPUB_VISION_MODEL=arabic-vision-model
 export PDF2EPUB_VISION_API_KEY=your-api-key
-export PDF2EPUB_OCR_TIMEOUT=120
+export PDF2EPUB_OCR_TIMEOUT=300
 uvicorn pdf2epub.web:app
 ```
 

@@ -102,6 +102,13 @@ def evaluate_text(text: str) -> TextQuality:
 
 def normalize_arabic(text: str) -> str:
     """Conservative cleanup: preserve letters, digits, and diacritics."""
+    text = "".join(
+        unicodedata.normalize("NFKC", character)
+        if 0xFB50 <= ord(character) <= 0xFDFF
+        or 0xFE70 <= ord(character) <= 0xFEFF
+        else character
+        for character in text
+    )
     text = unicodedata.normalize("NFC", text)
     text = INVISIBLE_RE.sub("", text).replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)

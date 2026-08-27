@@ -28,8 +28,8 @@ SETTING_DEFINITIONS = (
         "PDF2EPUB_OLLAMA_MODEL",
         "اسم نموذج Ollama",
         "Ollama — محلي أو سحابي",
-        default="qwen3.5:27b",
-        placeholder="qwen3.5:27b",
+        default="qwen3-vl:32b-instruct-gpu",
+        placeholder="qwen3-vl:32b-instruct-gpu",
     ),
     SettingDefinition(
         "PDF2EPUB_OLLAMA_API_KEY",
@@ -42,8 +42,8 @@ SETTING_DEFINITIONS = (
         "PDF2EPUB_OLLAMA_NUM_CTX",
         "حجم سياق Ollama",
         "Ollama — محلي أو سحابي",
-        default="4096",
-        placeholder="4096",
+        default="8192",
+        placeholder="8192",
     ),
     SettingDefinition(
         "PDF2EPUB_MISTRAL_BASE_URL",
@@ -89,8 +89,8 @@ SETTING_DEFINITIONS = (
         "PDF2EPUB_OCR_TIMEOUT",
         "مهلة OCR بالثواني",
         "إعدادات عامة",
-        default="120",
-        placeholder="120",
+        default="300",
+        placeholder="300",
     ),
 )
 
@@ -122,17 +122,17 @@ def _validate_value(definition: SettingDefinition, value: str) -> str:
             timeout = float(value)
         except ValueError as exc:
             raise ValueError("PDF2EPUB_OCR_TIMEOUT must be a number") from exc
-        if not 1 <= timeout <= 900:
-            raise ValueError("PDF2EPUB_OCR_TIMEOUT must be between 1 and 900")
+        if not 300 <= timeout <= 900:
+            raise ValueError("PDF2EPUB_OCR_TIMEOUT must be between 300 and 900")
         value = str(timeout).removesuffix(".0")
     if definition.key == "PDF2EPUB_OLLAMA_NUM_CTX":
         try:
             num_ctx = int(value)
         except ValueError as exc:
             raise ValueError("PDF2EPUB_OLLAMA_NUM_CTX must be an integer") from exc
-        if not 512 <= num_ctx <= 32768:
+        if not 512 <= num_ctx <= 16384:
             raise ValueError(
-                "PDF2EPUB_OLLAMA_NUM_CTX must be between 512 and 32768"
+                "PDF2EPUB_OLLAMA_NUM_CTX must be between 512 and 16384"
             )
         value = str(num_ctx)
     return value

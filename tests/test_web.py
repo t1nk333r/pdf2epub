@@ -96,6 +96,10 @@ def test_home_contains_settings_dialog():
     assert 'id="settings-button"' in response.text
     assert 'id="settings-dialog"' in response.text
     assert 'id="log-stream"' in response.text
+    assert 'id="ollama-model"' in response.text
+    assert "qwen3-vl:32b-instruct-gpu" in response.text
+    assert "qwen3-vl:30b-instruct-gpu" in response.text
+    assert "qwen3.8:27b-q4_K_M" in response.text
 
 
 def test_job_logs_are_structured_bounded_and_public(monkeypatch):

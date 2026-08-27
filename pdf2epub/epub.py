@@ -4,6 +4,7 @@ import html
 import io
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -131,22 +132,50 @@ def _xhtml(title: str, body: str) -> str:
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ar" lang="ar" dir="rtl">
 <head><meta charset="utf-8"/><title>{html.escape(title)}</title><link rel="stylesheet" href="../css/book.css"/></head>
-<body epub:type="bodymatter">{body}</body></html>"""
+<body epub:type="bodymatter" dir="rtl" lang="ar">{body}</body></html>"""
+
+
+FOOTNOTE_REF_RE = re.compile(r"\[\^([^\]]+)\]")
+
+
+def _footnote_target(identifier: str) -> str:
+    safe = re.sub(r"[^\w.-]+", "-", identifier, flags=re.UNICODE).strip("-")
+    return f"fn-{safe or 'note'}"
+
+
+def _inline_html(text: str, fix_bidi: bool) -> str:
+    pieces: list[str] = []
+    end = 0
+    for match in FOOTNOTE_REF_RE.finditer(text):
+        plain = text[end : match.start()]
+        pieces.append(wrap_ltr(plain) if fix_bidi else html.escape(plain))
+        identifier = match.group(1)
+        pieces.append(
+            f'<a epub:type="noteref" href="#{_footnote_target(identifier)}">'
+            f'{html.escape(identifier)}</a>'
+        )
+        end = match.end()
+    plain = text[end:]
+    pieces.append(wrap_ltr(plain) if fix_bidi else html.escape(plain))
+    return "".join(pieces)
 
 
 def _block_html(block, fix_bidi: bool = True) -> str:
     if block.type == BlockType.IMAGE and block.image_path:
         return f'<figure><img src="../images/{html.escape(block.image_path)}" alt=""/></figure>'
-    content = (wrap_ltr(block.text) if fix_bidi else html.escape(block.text)).replace(
-        "\n", "<br/>"
-    )
+    content = _inline_html(block.text, fix_bidi).replace("\n", "<br/>")
     if block.type == BlockType.HEADING:
-        return f"<h1>{content}</h1>"
+        level = 2 if block.heading_level == 2 else 1
+        return f"<h{level}>{content}</h{level}>"
     if block.type == BlockType.FOOTNOTE:
-        return f'<aside epub:type="footnote" class="footnote">{content}</aside>'
+        identifier = block.footnote_id or "note"
+        return (
+            f'<aside epub:type="footnote" class="footnote" '
+            f'id="{_footnote_target(identifier)}">{content}</aside>'
+        )
     if block.type == BlockType.POETRY:
         lines = "".join(
-            f"<p>{wrap_ltr(line) if fix_bidi else html.escape(line)}</p>"
+            f"<p>{_inline_html(line, fix_bidi)}</p>"
             for line in block.text.splitlines()
             if line
         )
@@ -177,9 +206,10 @@ def build_epub(
         current_title = document.title
         for page in document.pages:
             for block in page.blocks:
-                if block.type == BlockType.HEADING and current:
-                    chapters.append((current_title, "".join(current)))
-                    current = []
+                if block.type == BlockType.HEADING and block.heading_level == 1:
+                    if current:
+                        chapters.append((current_title, "".join(current)))
+                        current = []
                     current_title = block.text.strip()[:160]
                 current.append(_block_html(block, document.fix_bidi))
         if current or not chapters:

@@ -28,6 +28,10 @@ def test_normalization_is_conservative():
     assert normalize_arabic("  أُسامة   يحيى \n\n\n ١٢٣ ") == "أُسامة يحيى\n\n١٢٣"
 
 
+def test_arabic_presentation_forms_are_normalized():
+    assert normalize_arabic("ﻻ") == "لا"
+
+
 def test_ltr_islands_are_escaped_and_isolated():
     result = wrap_ltr("استخدم docker compose up ثم <هنا>")
     assert '<span dir="ltr" class="ltr">docker compose up</span>' in result

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .models import ConversionOptions
-from .ocr import provider_names
+from .ocr import OLLAMA_BOOK_MODELS, OLLAMA_QUALITY_MODEL, provider_names
 from .pipeline import convert
 
 
@@ -22,12 +22,18 @@ def main() -> None:
         choices=provider_names(),
         default="tesseract",
     )
+    parser.add_argument(
+        "--ollama-model",
+        choices=OLLAMA_BOOK_MODELS,
+        default=OLLAMA_QUALITY_MODEL,
+    )
     args = parser.parse_args()
     options = ConversionOptions(
         mode="force_ocr" if args.force_ocr else "automatic",
         preserve_images=not args.no_images,
         ocr_language=args.ocr_language,
         ocr_provider=args.ocr_provider,
+        ollama_model=args.ollama_model if args.ocr_provider == "ollama" else None,
     )
     outputs = convert(
         args.pdf,

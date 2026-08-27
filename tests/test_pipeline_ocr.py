@@ -16,7 +16,25 @@ class FakeOcrProvider:
     def recognize(self, image_png: bytes, language: str) -> OcrResult:
         assert image_png.startswith(b"\x89PNG")
         assert language == "ara+eng"
-        return OcrResult("الفصل الأول\nهذا نص من محرك خارجي.", 0.97, self.name)
+        return OcrResult(
+            "# الفصل الأول\n\nهذا نص من محرك خارجي [^1].\n\n[^1]: نص الحاشية.",
+            0.97,
+            self.name,
+            model="test-model",
+            prompt_tokens=1200,
+            output_tokens=80,
+            duration_seconds=3.5,
+            attempts=[
+                {
+                    "model": "test-model",
+                    "prompt_eval_count": 1200,
+                    "eval_count": 80,
+                    "total_duration": 3_500_000_000,
+                    "duration_seconds": 3.5,
+                    "retries": 0,
+                }
+            ],
+        )
 
 
 class FailingOcrProvider:
@@ -52,9 +70,16 @@ def test_custom_provider_runs_through_complete_pipeline(tmp_path):
         report["page_details"][0]["candidates"]["ocr:test_provider"]["confidence"]
         == 0.97
     )
+    metrics = report["page_details"][0]["ocr_metrics"]
+    assert metrics["model"] == "test-model"
+    assert metrics["attempts"][0]["prompt_eval_count"] == 1200
+    assert metrics["fallback_used"] is False
     with zipfile.ZipFile(outputs["epub"]) as epub:
         chapter = epub.read("EPUB/chapters/chapter-001.xhtml").decode()
         assert "هذا نص من محرك خارجي" in chapter
+        assert "<h1>الفصل الأول</h1>" in chapter
+        assert 'epub:type="noteref" href="#fn-1"' in chapter
+        assert 'epub:type="footnote" class="footnote" id="fn-1"' in chapter
 
 
 def test_missing_scan_ocr_blocks_normal_epub_publication(tmp_path):

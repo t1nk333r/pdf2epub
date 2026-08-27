@@ -62,6 +62,40 @@ def test_internal_figure_is_not_implicitly_marked_as_cover(tmp_path):
         assert "cover-image" not in package
 
 
+def test_semantic_headings_footnotes_and_rtl_body(tmp_path):
+    document = DocumentResult(
+        "كتاب",
+        pages=[
+            PageResult(
+                1,
+                PageType.SCAN,
+                "ocr:ollama",
+                600,
+                800,
+                blocks=[
+                    Block(BlockType.HEADING, "الفصل", heading_level=1),
+                    Block(BlockType.HEADING, "المبحث", heading_level=2),
+                    Block(BlockType.PARAGRAPH, "متن الحاشية [^1]"),
+                    Block(BlockType.FOOTNOTE, "نص الحاشية", footnote_id="1"),
+                ],
+            )
+        ],
+    )
+    output = tmp_path / "semantic.epub"
+    build_epub(document, output, validate=False)
+    with zipfile.ZipFile(output) as archive:
+        chapters = "\n".join(
+            archive.read(name).decode()
+            for name in archive.namelist()
+            if name.startswith("EPUB/chapters/")
+        )
+        assert '<body epub:type="bodymatter" dir="rtl" lang="ar">' in chapters
+        assert "<h1>الفصل</h1>" in chapters
+        assert "<h2>المبحث</h2>" in chapters
+        assert '<a epub:type="noteref" href="#fn-1">1</a>' in chapters
+        assert 'epub:type="footnote" class="footnote" id="fn-1"' in chapters
+
+
 def test_invalid_image_prevents_epub_publication(tmp_path):
     image = tmp_path / "broken.png"
     image.write_bytes(b"not-an-image")

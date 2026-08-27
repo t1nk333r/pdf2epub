@@ -52,6 +52,8 @@ class Block:
     bold: bool = False
     image_path: str | None = None
     source: str = "embedded_text"
+    heading_level: int = 1
+    footnote_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -70,6 +72,7 @@ class PageResult:
     selection_reason: str = ""
     candidate_scores: dict[str, float] = field(default_factory=dict)
     candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    ocr_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -140,6 +143,7 @@ class ConversionOptions:
     ocr_bad_pages: bool = True
     ocr_language: str = "ara+eng"
     ocr_provider: str = "tesseract"
+    ollama_model: str | None = None
     render_dpi: int = 300
     good_threshold: float = 0.68
     acceptable_threshold: float = 0.48

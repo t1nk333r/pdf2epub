@@ -265,7 +265,7 @@ def _remove_repeated_margins(document: DocumentResult) -> None:
 
 def _ocr_page(
     page, dpi: int, language: str, provider: OcrProvider
-) -> tuple[list[Block], float | None, str]:
+) -> tuple[list[Block], float | None, str, dict]:
     scale = dpi / 72
     pix = page.get_pixmap(
         matrix=_fitz().Matrix(scale, scale), colorspace=_fitz().csRGB, alpha=False
@@ -289,20 +289,89 @@ def _ocr_page(
         if region.text.strip()
     ]
     if not blocks and text:
-        blocks = [
-            Block(
-                BlockType.PARAGRAPH,
-                text,
-                (0, 0, page.rect.width, page.rect.height),
-                block_confidence,
-                source=f"ocr:{result.provider}",
-            )
-        ]
+        blocks = _structured_ocr_blocks(
+            text,
+            (0, 0, page.rect.width, page.rect.height),
+            block_confidence,
+            f"ocr:{result.provider}",
+        )
+    metrics = {
+        "model": result.model,
+        "prompt_tokens": result.prompt_tokens,
+        "output_tokens": result.output_tokens,
+        "duration_seconds": result.duration_seconds,
+        "retries": result.retries,
+        "attempts": result.attempts,
+        "fallback_reason": result.fallback_reason,
+        "fallback_used": len(result.attempts) > 1,
+    }
     return (
         blocks,
         result.confidence,
         result.provider,
+        metrics,
     )
+
+
+def _structured_ocr_blocks(
+    text: str,
+    bbox: tuple[float, float, float, float],
+    confidence: float,
+    source: str,
+) -> list[Block]:
+    """Convert conservative OCR Markdown conventions into semantic blocks."""
+    blocks: list[Block] = []
+    paragraph: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            blocks.append(
+                Block(
+                    BlockType.PARAGRAPH,
+                    "\n".join(paragraph),
+                    bbox,
+                    confidence,
+                    source=source,
+                )
+            )
+            paragraph.clear()
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            continue
+        heading = re.match(r"^(#{1,2})\s+(.+)$", stripped)
+        if heading:
+            flush_paragraph()
+            blocks.append(
+                Block(
+                    BlockType.HEADING,
+                    heading.group(2).strip(),
+                    bbox,
+                    confidence,
+                    source=source,
+                    heading_level=len(heading.group(1)),
+                )
+            )
+            continue
+        footnote = re.match(r"^\[\^([^\]]+)\]\s*:?[ \t]*(.+)$", stripped)
+        if footnote:
+            flush_paragraph()
+            blocks.append(
+                Block(
+                    BlockType.FOOTNOTE,
+                    footnote.group(2).strip(),
+                    bbox,
+                    confidence,
+                    source=source,
+                    footnote_id=footnote.group(1),
+                )
+            )
+            continue
+        paragraph.append(stripped)
+    flush_paragraph()
+    return blocks
 
 
 def _has_severe_text_issue(blocks: list[Block]) -> bool:
@@ -430,6 +499,7 @@ def analyze_pdf(
         )
         warnings: list[str] = []
         ocr_confidence = None
+        ocr_metrics: dict = {}
         if intentional_blank:
             blocks = []
             source = "intentional_blank"
@@ -439,19 +509,35 @@ def analyze_pdf(
         elif use_ocr:
             try:
                 if ocr_provider is None:
-                    ocr_provider = create_ocr_provider(options.ocr_provider)
+                    ocr_provider = create_ocr_provider(
+                        options.ocr_provider, ollama_model=options.ollama_model
+                    )
                 if progress:
                     progress(
                         f"OCR page {index + 1} via {ocr_provider.name}",
                         index,
                         len(doc),
                     )
-                ocr_blocks, ocr_confidence, provider_name = _ocr_page(
+                ocr_blocks, ocr_confidence, provider_name, ocr_metrics = _ocr_page(
                     page, options.render_dpi, options.ocr_language, ocr_provider
                 )
                 if progress:
+                    attempts = ocr_metrics.get("attempts") or [ocr_metrics]
+                    attempt_log = "; ".join(
+                        f"model={attempt.get('model') or provider_name} "
+                        f"prompt_eval_count={attempt.get('prompt_eval_count') or 0} "
+                        f"eval_count={attempt.get('eval_count') or 0} "
+                        f"total_duration={attempt.get('duration_seconds') or 0}s "
+                        f"retries={attempt.get('retries') or 0}"
+                        for attempt in attempts
+                    )
+                    fallback = (
+                        f"; fallback_used=yes; reason={ocr_metrics['fallback_reason']}"
+                        if ocr_metrics.get("fallback_reason")
+                        else "; fallback_used=no"
+                    )
                     progress(
-                        f"OCR page {index + 1} completed via {provider_name}",
+                        f"OCR page {index + 1} completed — {attempt_log}{fallback}",
                         index,
                         len(doc),
                     )
@@ -463,6 +549,7 @@ def analyze_pdf(
                     "score": ocr_quality.score,
                     "reasons": ocr_quality.reasons,
                     "confidence": ocr_confidence,
+                    "metrics": ocr_metrics,
                 }
                 ocr_has_severe_issue = _has_severe_text_issue(ocr_blocks)
                 choose_ocr = bool(ocr_blocks) and (
@@ -507,6 +594,10 @@ def analyze_pdf(
                     selection_reason = "OCR returned no usable text"
                     warnings.append("OCR returned no usable text")
             except (MissingDependency, OcrError) as exc:
+                if progress:
+                    progress(
+                        f"OCR page {index + 1} failed — {exc}", index, len(doc)
+                    )
                 if embedded:
                     blocks = embedded_blocks
                     warnings.append(
@@ -579,6 +670,7 @@ def analyze_pdf(
                 selection_reason,
                 candidate_scores,
                 candidates,
+                ocr_metrics,
             )
         )
     _remove_repeated_margins(result)

@@ -15,7 +15,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .models import ConversionOptions
-from .ocr import provider_descriptor, provider_names, provider_status
+from .ocr import (
+    OLLAMA_BOOK_MODELS,
+    OLLAMA_QUALITY_MODEL,
+    provider_descriptor,
+    provider_names,
+    provider_status,
+)
 from .pipeline import ConversionIntegrityError, ConversionPublicationError, convert
 from .settings import clear_runtime_settings, public_settings, update_runtime_settings
 
@@ -211,12 +217,15 @@ def create_job(
     fix_bidi: bool = Form(True),
     ocr_bad_pages: bool = Form(True),
     ocr_provider: str = Form("tesseract"),
+    ollama_model: str = Form(OLLAMA_QUALITY_MODEL),
     remote_acknowledged: bool = Form(False),
 ) -> dict:
     if mode not in {"automatic", "prefer_text", "force_ocr"}:
         raise HTTPException(400, "Invalid mode")
     if ocr_provider not in provider_names():
         raise HTTPException(400, "Invalid OCR provider")
+    if ocr_provider == "ollama" and ollama_model not in OLLAMA_BOOK_MODELS:
+        raise HTTPException(400, "Invalid Ollama OCR model")
     descriptor = provider_descriptor(ocr_provider)
     if descriptor and descriptor.remote and not remote_acknowledged:
         raise HTTPException(
@@ -246,6 +255,7 @@ def create_job(
         fix_bidi=fix_bidi,
         ocr_bad_pages=ocr_bad_pages,
         ocr_provider=ocr_provider,
+        ollama_model=ollama_model if ocr_provider == "ollama" else None,
     )
     with lock:
         job = Job(job_id)
@@ -302,6 +312,7 @@ INDEX_HTML = """<!doctype html>
 <main class="card">
 <nav class="navbar" aria-label="شريط الأدوات"><div class="title-wrap"><h1>تحويل PDF عربي إلى EPUB</h1><p class="lead">يفحص كل صفحة ويستخدم النص المضمّن متى كان موثوقاً، ثم يلجأ إلى OCR للصفحات الرديئة أو المصوّرة.</p></div><button id="settings-button" type="button" class="cog" title="إعدادات OCR" aria-label="فتح إعدادات OCR">⚙</button></nav>
 <form id="form"><div class="drop"><input required name="file" type="file" accept="application/pdf,.pdf"></div><fieldset><label>طريقة المعالجة <select name="mode"><option value="automatic">تلقائي</option><option value="prefer_text">تفضيل النص المضمّن</option><option value="force_ocr">فرض OCR</option></select></label><label>محرك OCR <select name="ocr_provider" id="ocr-provider"><option value="">جارٍ تحميل المحركات…</option></select></label><small id="provider-note">يُرسل محتوى الصفحات إلى الخدمة المحددة فقط عندما تحتاج الصفحة إلى OCR.</small>
+<label id="ollama-model-row">نموذج Ollama لهذا الكتاب <select name="ollama_model" id="ollama-model"><option value="qwen3-vl:32b-instruct-gpu">جودة — Qwen3 VL 32B Instruct</option><option value="qwen3-vl:30b-instruct-gpu">سريع — Qwen3 VL 30B Instruct</option><option value="qwen3.8:27b-q4_K_M">متوازن — Qwen3.8 27B Q4</option></select></label>
 <label><input type="checkbox" name="preserve_images" checked> حفظ الرسوم والصور الداخلية فقط — لا تُحفظ صور الصفحات الكاملة</label><label><input type="checkbox" name="detect_chapters" checked> اكتشاف الفصول</label><label><input type="checkbox" name="detect_footnotes" checked> اكتشاف الحواشي</label><label><input type="checkbox" name="fix_bidi" checked> ضبط اتجاه العربية والإنجليزية</label><label><input type="checkbox" name="ocr_bad_pages" checked> OCR للصفحات الرديئة</label></fieldset><button>تحويل</button></form>
 <section id="status" class="hidden"><h2 id="stage">جارٍ التحليل</h2><div class="bar"><i id="progress"></i></div><p id="percent"></p><section class="log-wrap" aria-labelledby="log-heading"><h3 id="log-heading">سجل التحويل المباشر</h3><div id="log-stream" class="log-stream" role="log" aria-live="polite" aria-relevant="additions"></div></section><p id="error" class="error"></p><div id="links"></div><pre id="report" class="hidden"></pre><button id="restart" type="button" class="secondary hidden">ابدأ من جديد</button></section>
 </main>
@@ -311,8 +322,10 @@ const form=document.querySelector('#form'),statusBox=document.querySelector('#st
 let run=0,providers=[],lastLogId=0;
 const sourceLabels={runtime:'من صفحة الإعدادات',environment:'من ملف .env',default:'قيمة افتراضية'};
 async function jsonRequest(url,options={}){const response=await fetch(url,options);const data=await response.json();if(!response.ok)throw new Error(data.detail||'تعذر إكمال الطلب');return data}
-async function loadProviders(){try{const data=await jsonRequest('/api/ocr/providers');providers=data.providers;providerSelect.replaceChildren();for(const provider of providers){const option=document.createElement('option');option.value=provider.id;option.disabled=!provider.ready;option.textContent=provider.label+(provider.remote?' — خارجي':' — محلي')+(provider.ready?'':' — غير جاهز');providerSelect.append(option)}const first=providers.find(provider=>provider.ready);if(first){providerSelect.value=first.id;document.querySelector('#provider-note').textContent=first.detail}else{providerSelect.value='';document.querySelector('#provider-note').textContent='لا يوجد محرك OCR جاهز. افتح زر الإعدادات ⚙ لإعداده.'}}catch(error){document.querySelector('#provider-note').textContent=error.message}}
-function settingField(field){const wrapper=document.createElement('label');wrapper.className='setting';const title=document.createElement('span');title.textContent=field.label;const row=document.createElement('span');row.className='setting-row';const input=document.createElement('input');input.className='settings-input';input.name=field.key;input.type=field.secret?'password':(field.key==='PDF2EPUB_OCR_TIMEOUT'?'number':'text');input.placeholder=field.placeholder||'';input.value=field.value||'';input.autocomplete=field.secret?'new-password':'off';row.append(input);if(field.secret){const clearLabel=document.createElement('label');const clear=document.createElement('input');clear.type='checkbox';clear.dataset.clearKey=field.key;clearLabel.append(clear,' مسح');row.append(clearLabel)}const note=document.createElement('small');note.textContent=(sourceLabels[field.source]||field.source)+(field.secret&&field.configured?' — توجد قيمة محفوظة':'');wrapper.append(title,row,note);return wrapper}
+function updateModelVisibility(){document.querySelector('#ollama-model-row').classList.toggle('hidden',providerSelect.value!=='ollama')}
+async function loadProviders(){try{const data=await jsonRequest('/api/ocr/providers');providers=data.providers;providerSelect.replaceChildren();for(const provider of providers){const option=document.createElement('option');option.value=provider.id;option.disabled=!provider.ready;option.textContent=provider.label+(provider.remote?' — خارجي':' — محلي')+(provider.ready?'':' — غير جاهز');providerSelect.append(option)}const ollama=providers.find(provider=>provider.id==='ollama');if(ollama&&ollama.book_models?.includes(ollama.model))document.querySelector('#ollama-model').value=ollama.model;const first=providers.find(provider=>provider.ready);if(first){providerSelect.value=first.id;document.querySelector('#provider-note').textContent=first.detail}else{providerSelect.value='';document.querySelector('#provider-note').textContent='لا يوجد محرك OCR جاهز. افتح زر الإعدادات ⚙ لإعداده.'}updateModelVisibility()}catch(error){document.querySelector('#provider-note').textContent=error.message}}
+providerSelect.onchange=()=>{const selected=providers.find(provider=>provider.id===providerSelect.value);if(selected)document.querySelector('#provider-note').textContent=selected.detail;updateModelVisibility()};
+function settingField(field){const wrapper=document.createElement('label');wrapper.className='setting';const title=document.createElement('span');title.textContent=field.label;const row=document.createElement('span');row.className='setting-row';const input=document.createElement('input');input.className='settings-input';input.name=field.key;input.type=field.secret?'password':(['PDF2EPUB_OCR_TIMEOUT','PDF2EPUB_OLLAMA_NUM_CTX'].includes(field.key)?'number':'text');input.placeholder=field.placeholder||'';input.value=field.value||'';input.autocomplete=field.secret?'new-password':'off';row.append(input);if(field.secret){const clearLabel=document.createElement('label');const clear=document.createElement('input');clear.type='checkbox';clear.dataset.clearKey=field.key;clearLabel.append(clear,' مسح');row.append(clearLabel)}const note=document.createElement('small');note.textContent=(sourceLabels[field.source]||field.source)+(field.secret&&field.configured?' — توجد قيمة محفوظة':'');wrapper.append(title,row,note);return wrapper}
 async function loadSettings(){settingsMessage.textContent='جارٍ تحميل الإعدادات…';settingsFields.replaceChildren();try{const data=await jsonRequest('/api/settings');const groups=new Map();for(const field of data.fields){if(!groups.has(field.section)){const group=document.createElement('section');group.className='settings-group';const heading=document.createElement('h3');heading.textContent=field.section;group.append(heading);groups.set(field.section,group);settingsFields.append(group)}groups.get(field.section).append(settingField(field))}settingsMessage.textContent=''}catch(error){settingsMessage.className='error';settingsMessage.textContent=error.message}}
 document.querySelector('#settings-button').onclick=async()=>{dialog.showModal();await loadSettings()};document.querySelector('#settings-close').onclick=()=>dialog.close();
 settingsForm.onsubmit=async event=>{event.preventDefault();const values={};for(const input of settingsForm.querySelectorAll('.settings-input')){if(input.type!=='password'||input.value)values[input.name]=input.value}for(const clear of settingsForm.querySelectorAll('[data-clear-key]:checked'))values[clear.dataset.clearKey]='';settingsMessage.className='';settingsMessage.textContent='جارٍ الحفظ…';try{await jsonRequest('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({values})});settingsMessage.className='success';settingsMessage.textContent='تم الحفظ في ذاكرة الخادم.';await loadProviders();await loadSettings()}catch(error){settingsMessage.className='error';settingsMessage.textContent=error.message}};
