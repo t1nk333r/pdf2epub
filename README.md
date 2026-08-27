@@ -15,7 +15,7 @@ This is an MVP: complex region-level hybrid OCR, semantic AI correction, high-fi
 
 ## Install
 
-Python 3.11–3.13 is recommended. Install Poppler only if you want its separate command-line diagnostics; PyMuPDF powers the current pipeline.
+Python 3.11–3.14 is supported. Install Poppler only if you want its separate command-line diagnostics; PyMuPDF powers the current pipeline.
 
 ```bash
 python -m venv .venv
@@ -37,6 +37,14 @@ Install `epubcheck` and put it on `PATH`; it is required for normal publication.
 Internal ZIP, XML, manifest, spine, navigation, and image validation also always
 runs. A missing validator or any conformance error is fatal and the EPUB is not
 published.
+
+The web page reports missing local capabilities before upload. A red EPUBCheck
+warning means analysis can run, but a normal EPUB cannot be published until
+EPUBCheck is installed and available on `PATH`. A Tesseract warning means local
+OCR is disabled because the executable or its `ara` language data is missing;
+you may still use another OCR provider that is shown as ready. The Docker image
+includes EPUBCheck and Arabic/English Tesseract, while bare-metal installations
+must provide them separately using the commands above.
 
 ## Run
 
@@ -82,10 +90,11 @@ which is excluded from the image and Git.
 
 ### Jenkins
 
-The included `Jenkinsfile` validates the Compose configuration, builds a tagged
-Docker image, verifies EPUBCheck and the Arabic/English Tesseract languages, and
-runs the container health check. The Jenkins agent needs Docker with Compose v2
-and permission to access the Docker daemon.
+The included `Jenkinsfile` validates the Compose configuration, runs the tests
+and Ruff under Python 3.14 with a bounded stage timeout, builds a tagged Docker
+image, verifies EPUBCheck and the Arabic/English Tesseract languages, and runs
+the container health check. The Jenkins agent needs Docker with Compose v2 and
+permission to access the Docker daemon.
 
 ## OCR providers
 

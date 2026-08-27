@@ -1,8 +1,15 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from pdf2epub import web
 from pdf2epub.settings import clear_runtime_settings
 from pdf2epub.web import Job, _append_log, _quality_summary, _safe_pdf_name
+
+
+@pytest.fixture
+def client():
+    with TestClient(web.app) as test_client:
+        yield test_client
 
 
 def test_quality_summary_omits_large_page_details():
@@ -42,8 +49,8 @@ def test_uploaded_arabic_filename_is_preserved_safely():
     assert _safe_pdf_name("../../bad/name.pdf") == "name.pdf"
 
 
-def test_remote_ocr_requires_explicit_transfer_acknowledgement():
-    response = TestClient(web.app).post(
+def test_remote_ocr_requires_explicit_transfer_acknowledgement(client):
+    response = client.post(
         "/api/jobs",
         files={"file": ("book.pdf", b"%PDF-minimal", "application/pdf")},
         data={"ocr_provider": "mistral"},
@@ -52,15 +59,68 @@ def test_remote_ocr_requires_explicit_transfer_acknowledgement():
     assert "explicit acknowledgement" in response.json()["detail"]
 
 
-def test_health_endpoint_reports_epubcheck_state():
-    response = TestClient(web.app).get("/api/health")
+def _provider_status(*, tesseract_configured=True, tesseract_ready=True):
+    return [
+        {
+            "id": "tesseract",
+            "configured": tesseract_configured,
+            "ready": tesseract_ready,
+        },
+        {"id": "mistral", "configured": False, "ready": False},
+    ]
+
+
+def test_health_endpoint_reports_no_warnings_when_local_tools_ready(
+    client, monkeypatch
+):
+    monkeypatch.setattr(web.shutil, "which", lambda name: "/usr/bin/epubcheck")
+    monkeypatch.setattr(web, "provider_status", _provider_status)
+    response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert isinstance(response.json()["epubcheck_available"], bool)
+    assert response.json()["epubcheck_available"] is True
+    assert response.json()["warnings"] == []
 
 
-def test_settings_api_updates_values_without_returning_secrets():
-    client = TestClient(web.app)
+def test_health_warns_when_epubcheck_is_missing(client, monkeypatch):
+    monkeypatch.setattr(web.shutil, "which", lambda name: None)
+    monkeypatch.setattr(web, "provider_status", _provider_status)
+    response = client.get("/api/health")
+    warning = response.json()["warnings"][0]
+    assert warning["code"] == "epubcheck_missing"
+    assert warning["severity"] == "error"
+    assert "لا يمكن نشر" in warning["message"]
+
+
+def test_health_warns_when_tesseract_is_missing(client, monkeypatch):
+    monkeypatch.setattr(web.shutil, "which", lambda name: "/usr/bin/epubcheck")
+    monkeypatch.setattr(
+        web,
+        "provider_status",
+        lambda: _provider_status(tesseract_configured=False, tesseract_ready=False),
+    )
+    response = client.get("/api/health")
+    warning = response.json()["warnings"][0]
+    assert warning["code"] == "tesseract_missing"
+    assert warning["severity"] == "warning"
+    assert "غير متاح" in warning["message"]
+
+
+def test_health_warns_when_tesseract_arabic_data_is_missing(client, monkeypatch):
+    monkeypatch.setattr(web.shutil, "which", lambda name: "/usr/bin/epubcheck")
+    monkeypatch.setattr(
+        web,
+        "provider_status",
+        lambda: _provider_status(tesseract_ready=False),
+    )
+    response = client.get("/api/health")
+    warning = response.json()["warnings"][0]
+    assert warning["code"] == "tesseract_arabic_missing"
+    assert warning["severity"] == "warning"
+    assert "اللغة العربية" in warning["message"]
+
+
+def test_settings_api_updates_values_without_returning_secrets(client):
     clear_runtime_settings()
     try:
         response = client.put(
@@ -82,19 +142,24 @@ def test_settings_api_updates_values_without_returning_secrets():
         clear_runtime_settings()
 
 
-def test_settings_api_rejects_unknown_fields():
-    response = TestClient(web.app).put(
+def test_settings_api_rejects_unknown_fields(client):
+    response = client.put(
         "/api/settings", json={"values": {"NOT_A_SETTING": "value"}}
     )
     assert response.status_code == 400
     assert "Unknown settings" in response.json()["detail"]
 
 
-def test_home_contains_settings_dialog():
-    response = TestClient(web.app).get("/")
+def test_home_contains_settings_dialog(client):
+    response = client.get("/")
     assert response.status_code == 200
     assert 'id="settings-button"' in response.text
     assert 'id="settings-dialog"' in response.text
+    assert 'id="capability-warnings"' in response.text
+    assert 'role="alert"' in response.text
+    assert 'aria-live="polite"' in response.text
+    assert "loadHealth()" in response.text
+    assert "message.textContent=warning.message" in response.text
     assert 'id="log-stream"' in response.text
     assert 'id="ollama-model"' in response.text
     assert "qwen3-vl:32b-instruct-gpu" in response.text
