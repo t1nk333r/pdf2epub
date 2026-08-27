@@ -1,7 +1,15 @@
+import hashlib
+import json
+import threading
+from dataclasses import asdict
+
+import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
 from pdf2epub import web
+from pdf2epub.checkpoints import CheckpointStore, JobManifest, processing_contract
+from pdf2epub.models import ConversionOptions, JobState
 from pdf2epub.settings import clear_runtime_settings
 from pdf2epub.web import Job, _append_log, _quality_summary, _safe_pdf_name
 
@@ -143,9 +151,7 @@ def test_settings_api_updates_values_without_returning_secrets(client):
 
 
 def test_settings_api_rejects_unknown_fields(client):
-    response = client.put(
-        "/api/settings", json={"values": {"NOT_A_SETTING": "value"}}
-    )
+    response = client.put("/api/settings", json={"values": {"NOT_A_SETTING": "value"}})
     assert response.status_code == 400
     assert "Unknown settings" in response.json()["detail"]
 
@@ -165,6 +171,14 @@ def test_home_contains_settings_dialog(client):
     assert "qwen3-vl:32b-instruct-gpu" in response.text
     assert "qwen3-vl:30b-instruct-gpu" in response.text
     assert "qwen3.8:27b-q4_K_M" in response.text
+    assert 'id="job-list"' in response.text
+    assert 'id="pause"' in response.text
+    assert 'id="resume"' in response.text
+    assert "إيقاف مؤقت" in response.text
+    assert "متابعة التحويل" in response.text
+    assert "aria-busy" in response.text
+    assert "new URLSearchParams(location.search)" in response.text
+    assert "localStorage.getItem('pdf2epub-active-job')" in response.text
 
 
 def test_job_logs_are_structured_bounded_and_public(monkeypatch):
@@ -189,5 +203,158 @@ def test_progress_updates_append_log_event():
         public = web.jobs[job_id].public()
         assert public["percent"] == 20
         assert public["logs"][-1]["message"] == "Analyzing pages — 2/10 (20%)"
+    finally:
+        web.jobs.pop(job_id, None)
+
+
+def _persistent_job(tmp_path, state=JobState.PAUSED):
+    job_id = "d" * 32
+    options = ConversionOptions(require_epubcheck=False)
+    store = CheckpointStore(tmp_path, job_id)
+    store.initialize()
+    source = store.root / "source.pdf"
+    document = pymupdf.open()
+    for _ in range(10):
+        document.new_page()
+    document.save(source)
+    document.close()
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest = JobManifest(
+        id=job_id,
+        filename="كتاب.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=10,
+        state=state,
+        stage=state.value,
+        options=asdict(options),
+        contract=processing_contract(source_hash, 10, options, "tesseract", None),
+        provider_id="tesseract",
+    )
+    store.write_manifest(manifest)
+    job = web._job_from_manifest(store, manifest)
+    web.jobs[job_id] = job
+    return job
+
+
+def test_jobs_list_is_summary_without_full_logs(client, tmp_path):
+    job = _persistent_job(tmp_path)
+    _append_log(job, "latest")
+    try:
+        response = client.get("/api/jobs")
+        summary = next(item for item in response.json()["jobs"] if item["id"] == job.id)
+        assert "logs" not in summary
+        assert summary["last_event"]["message"] == "latest"
+        assert summary["safe_pages"] == 0
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_pause_is_idempotent_and_sets_page_boundary_event(client, tmp_path):
+    job = _persistent_job(tmp_path, JobState.PROCESSING)
+    try:
+        first = client.post(f"/api/jobs/{job.id}/pause")
+        second = client.post(f"/api/jobs/{job.id}/pause")
+        assert first.status_code == second.status_code == 200
+        assert second.json()["state"] == "pause_requested"
+        assert job.pause_event.is_set()
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_resume_is_idempotent_and_starts_one_worker(tmp_path, monkeypatch):
+    job = _persistent_job(tmp_path)
+    starts = []
+    monkeypatch.setattr(
+        web,
+        "provider_status",
+        lambda: [{"id": "tesseract", "ready": True}],
+    )
+
+    def fake_start(runtime, pdf, options):
+        starts.append(runtime.id)
+        runtime.thread = type("Thread", (), {"is_alive": lambda self: True})()
+
+    monkeypatch.setattr(web, "_start_worker", fake_start)
+    barrier = threading.Barrier(3)
+    results = []
+
+    def resume():
+        barrier.wait()
+        results.append(web.resume_job(job.id))
+
+    workers = [threading.Thread(target=resume) for _ in range(2)]
+    try:
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=2)
+        assert len(results) == 2
+        assert len(starts) == 1
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_startup_recovery_marks_active_job_interrupted(tmp_path, monkeypatch):
+    job = _persistent_job(tmp_path, JobState.PROCESSING)
+    job.manifest.lease = {"process": "stale", "token": "old-worker"}
+    job.store.write_manifest(job.manifest)
+    web.jobs.pop(job.id)
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    web._recover_jobs()
+    try:
+        assert web.jobs[job.id].state == "interrupted"
+        assert web.jobs[job.id].thread is None
+        assert web.jobs[job.id].manifest.lease is None
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_resume_unavailable_provider_returns_stable_422(client, tmp_path, monkeypatch):
+    job = _persistent_job(tmp_path)
+    monkeypatch.setattr(
+        web,
+        "provider_status",
+        lambda: [{"id": "tesseract", "ready": False}],
+    )
+    try:
+        response = client.post(f"/api/jobs/{job.id}/resume")
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "provider_unavailable"
+        assert job.state == "paused"
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_create_job_persists_source_contract_before_worker(
+    client, tmp_path, monkeypatch
+):
+    source = tmp_path / "upload.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(source)
+    document.close()
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(web, "JOB_ROOT", jobs_root)
+    monkeypatch.setattr(web, "provider_names", lambda: {"tesseract"})
+    monkeypatch.setattr(web, "_start_worker", lambda *args: None)
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("كتاب.pdf", source.read_bytes(), "application/pdf")},
+        data={"ocr_provider": "tesseract"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    try:
+        store = CheckpointStore(jobs_root, job_id)
+        item = store.load_manifest()
+        assert item.filename == "كتاب.pdf"
+        assert (
+            item.source_sha256
+            == hashlib.sha256((store.root / "source.pdf").read_bytes()).hexdigest()
+        )
+        assert item.page_count == 1
+        assert "API_KEY" not in json.dumps(item.to_dict())
     finally:
         web.jobs.pop(job_id, None)

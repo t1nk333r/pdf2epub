@@ -46,6 +46,26 @@ you may still use another OCR provider that is shown as ready. The Docker image
 includes EPUBCheck and Arabic/English Tesseract, while bare-metal installations
 must provide them separately using the commands above.
 
+## Durable jobs, pause, and recovery
+
+The web dashboard stores every completed page as an atomic checkpoint. Use
+**إيقاف مؤقت** to request a cooperative pause: an in-flight OCR page finishes,
+is saved, and only then does the job become paused. Use **متابعة التحويل** to
+continue from the first missing page. After a sudden power failure, at most the
+currently in-flight page repeats once the preceding checkpoint is durable.
+
+Set `PDF2EPUB_DATA_DIR` to a persistent, backed-up filesystem. The directory is
+sensitive: it retains uploaded PDFs, extracted text, images, checkpoints, and
+final output. Startup marks unfinished work `interrupted` and never resumes GPU
+work automatically. Resume verifies the source, page count, options, provider,
+model, prompt contract, and checkpoint schema. Restore a missing Ollama model or
+OCR provider through the settings/environment, then explicitly resume.
+
+There is no automatic cleanup, quota, or retention policy yet. Monitor disk
+usage and back up the entire data root while the service is stopped. Run exactly
+one application process and one Uvicorn worker against a data root; the local
+lease is not a distributed lock.
+
 ## Run
 
 ```bash
@@ -78,7 +98,7 @@ docker compose up --build
 ```
 
 Open <http://127.0.0.1:8000>. The Compose file binds only to localhost and stores
-temporary job data in the `pdf2epub_data` volume. Set `PDF2EPUB_PORT` in `.env`
+durable jobs and checkpoints under `/data` in the `pdf2epub_data` volume. Set `PDF2EPUB_PORT` in `.env`
 if port 8000 is already used; this Compose-only value cannot be changed from the
 web settings panel because it controls the listener before the app starts.
 
@@ -198,4 +218,7 @@ pytest
 
 ## Production notes
 
-The in-process thread queue and `/tmp` storage are suitable for a single-node MVP. For production, replace them with Celery/Redis, durable object storage, persisted job metadata, upload malware scanning, authentication/rate limits, and scheduled job cleanup. OCR workloads should run in isolated workers with CPU/memory/time limits.
+Durable checkpoints support one local application process. For multi-process or
+multi-host production, replace the local lease with a database-backed queue and
+distributed ownership before adding workers. Also add upload malware scanning,
+authentication/rate limits, scheduled retention, and CPU/memory/time isolation.

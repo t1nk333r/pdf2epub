@@ -1,9 +1,22 @@
+import hashlib
+from dataclasses import asdict
+
+import pymupdf
+import pytest
+
 from pdf2epub.analyzer import (
     _has_severe_text_issue,
     _merge_paragraph_lines,
     _visual_text_lines,
 )
-from pdf2epub.models import Block, BlockType
+from pdf2epub.checkpoints import (
+    CheckpointStore,
+    ConversionControl,
+    JobManifest,
+    PauseRequested,
+    processing_contract,
+)
+from pdf2epub.models import Block, BlockType, ConversionOptions, JobState
 
 
 def _line(text, bbox):
@@ -48,3 +61,50 @@ def test_one_corrupt_block_routes_the_page_to_candidate_comparison():
         Block(BlockType.PARAGRAPH, "هذا نص عربي سليم ومفهوم للقارئ."),
     ]
     assert _has_severe_text_issue(blocks)
+
+
+def test_pause_checkpoints_page_and_resume_starts_at_next_page(tmp_path):
+    source = tmp_path / "book.pdf"
+    pdf = pymupdf.open()
+    for number in range(2):
+        page = pdf.new_page()
+        page.insert_text((72, 72), f"page {number + 1} embedded text")
+    pdf.save(source)
+    pdf.close()
+    options = ConversionOptions(
+        mode="prefer_text", preserve_images=False, require_epubcheck=False
+    )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    contract = processing_contract(source_hash, 2, options, "tesseract", None)
+    store = CheckpointStore(tmp_path / "jobs", "a" * 32)
+    store.initialize()
+    manifest = JobManifest(
+        id="a" * 32,
+        filename="book.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=2,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract=contract,
+        provider_id="tesseract",
+    )
+    store.write_manifest(manifest)
+    paused = ConversionControl(store, manifest, pause_requested=lambda: True)
+    from pdf2epub.analyzer import analyze_pdf
+
+    with pytest.raises(PauseRequested):
+        analyze_pdf(source, store.output, options, control=paused)
+    assert manifest.safe_pages == 1
+    assert store.checkpoint_path(1).is_file()
+    assert not store.checkpoint_path(2).exists()
+
+    resumed = analyze_pdf(
+        source,
+        store.output,
+        options,
+        control=ConversionControl(store, manifest),
+    )
+    assert [page.page for page in resumed.pages] == [1, 2]
+    assert manifest.safe_pages == 2

@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
+from .checkpoints import ConversionControl
 from .models import (
     Block,
     BlockType,
@@ -438,13 +439,28 @@ def analyze_pdf(
     options: ConversionOptions,
     progress: Progress | None = None,
     ocr_provider: OcrProvider | None = None,
+    control: ConversionControl | None = None,
 ) -> DocumentResult:
     fitz = _fitz()
     doc = fitz.open(path)
-    result = DocumentResult(title=path.stem, fix_bidi=options.fix_bidi)
-    image_dir = work_dir / "images"
+    try:
+        result = (
+            control.store.reconstruct(control.manifest)
+            if control is not None
+            else DocumentResult(title=path.stem, fix_bidi=options.fix_bidi)
+        )
+    except Exception:
+        doc.close()
+        raise
+    image_dir = control.store.images if control is not None else work_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
-    for index, page in enumerate(doc):
+    try:
+      for index, page in enumerate(doc):
+        if index < len(result.pages):
+            continue
+        if control is not None:
+            control.manifest.current_page = index + 1
+            control.store.write_manifest(control.manifest)
         if progress:
             progress("Analyzing pages", index, len(doc))
         blocks = _raw_blocks(page)
@@ -654,8 +670,7 @@ def analyze_pdf(
                     warnings.append(
                         f"Could not preserve image {image_index + 1}: {exc}"
                     )
-        result.pages.append(
-            PageResult(
+        page_result = PageResult(
                 index + 1,
                 kind,
                 source,
@@ -672,9 +687,12 @@ def analyze_pdf(
                 candidates,
                 ocr_metrics,
             )
-        )
-    _remove_repeated_margins(result)
-    if progress:
-        progress("Analyzing pages", len(doc), len(doc))
-    doc.close()
-    return result
+        result.pages.append(page_result)
+        if control is not None:
+            control.page_committed(page_result)
+      _remove_repeated_margins(result)
+      if progress:
+          progress("Analyzing pages", len(doc), len(doc))
+      return result
+    finally:
+      doc.close()

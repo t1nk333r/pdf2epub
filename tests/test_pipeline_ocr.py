@@ -1,11 +1,21 @@
+import hashlib
 import json
 import zipfile
+from dataclasses import asdict
 
 import pymupdf
 import pytest
 from PIL import Image
 
-from pdf2epub.models import ConversionOptions
+from pdf2epub import pipeline
+from pdf2epub.checkpoints import (
+    CheckpointStore,
+    ConversionControl,
+    JobManifest,
+    PauseRequested,
+    processing_contract,
+)
+from pdf2epub.models import ConversionOptions, JobState
 from pdf2epub.ocr import OcrError, OcrResult
 from pdf2epub.pipeline import ConversionIntegrityError, convert
 
@@ -13,7 +23,11 @@ from pdf2epub.pipeline import ConversionIntegrityError, convert
 class FakeOcrProvider:
     name = "test_provider"
 
+    def __init__(self):
+        self.calls = 0
+
     def recognize(self, image_png: bytes, language: str) -> OcrResult:
+        self.calls += 1
         assert image_png.startswith(b"\x89PNG")
         assert language == "ara+eng"
         return OcrResult(
@@ -124,3 +138,164 @@ def test_review_pages_require_explicit_partial_output(tmp_path):
     report = json.loads(outputs["report"].read_text())
     assert report["integrity"]["status"] == "review"
     assert "Partial output was explicitly allowed" in report["warnings"][0]
+
+
+def test_pipeline_pause_publishes_nothing_and_resume_reuses_checkpoint(tmp_path):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+    options = ConversionOptions(
+        mode="force_ocr", preserve_images=False, require_epubcheck=False
+    )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    store = CheckpointStore(tmp_path / "jobs", "a" * 32)
+    store.initialize()
+    manifest = JobManifest(
+        id="a" * 32,
+        filename="scan.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=1,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract=processing_contract(source_hash, 1, options, "test_provider", None),
+        provider_id="test_provider",
+    )
+    store.write_manifest(manifest)
+    provider = FakeOcrProvider()
+    with pytest.raises(PauseRequested):
+        convert(
+            source,
+            store.output,
+            options,
+            ocr_provider=provider,
+            control=ConversionControl(store, manifest, pause_requested=lambda: True),
+        )
+    assert not list(store.output.glob("*.epub"))
+    outputs = convert(
+        source,
+        store.output,
+        options,
+        ocr_provider=provider,
+        control=ConversionControl(store, manifest),
+    )
+    assert outputs["epub"].is_file()
+    assert manifest.safe_pages == 1
+    assert provider.calls == 1
+
+
+def test_report_interruption_resumes_without_repeating_ocr(tmp_path, monkeypatch):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+    options = ConversionOptions(
+        mode="force_ocr", preserve_images=False, require_epubcheck=False
+    )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    store = CheckpointStore(tmp_path / "jobs", "a" * 32)
+    store.initialize()
+    manifest = JobManifest(
+        id="a" * 32,
+        filename="scan.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=1,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract=processing_contract(source_hash, 1, options, "test_provider", None),
+        provider_id="test_provider",
+    )
+    store.write_manifest(manifest)
+    provider = FakeOcrProvider()
+    original = pipeline._write_report
+    failures = 0
+
+    def fail_once(document, report_path):
+        nonlocal failures
+        failures += 1
+        if failures == 1:
+            raise OSError("injected report interruption")
+        return original(document, report_path)
+
+    monkeypatch.setattr(pipeline, "_write_report", fail_once)
+    with pytest.raises(OSError, match="injected report"):
+        convert(
+            source,
+            store.output,
+            options,
+            ocr_provider=provider,
+            control=ConversionControl(store, manifest),
+        )
+    assert not list(store.output.glob("*.epub"))
+    outputs = convert(
+        source,
+        store.output,
+        options,
+        ocr_provider=provider,
+        control=ConversionControl(store, manifest),
+    )
+    assert outputs["epub"].is_file()
+    assert provider.calls == 1
+
+
+def test_epub_build_interruption_resumes_without_repeating_ocr(tmp_path, monkeypatch):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+    options = ConversionOptions(
+        mode="force_ocr", preserve_images=False, require_epubcheck=False
+    )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    store = CheckpointStore(tmp_path / "jobs", "a" * 32)
+    store.initialize()
+    manifest = JobManifest(
+        id="a" * 32,
+        filename="scan.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=1,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract=processing_contract(source_hash, 1, options, "test_provider", None),
+        provider_id="test_provider",
+    )
+    store.write_manifest(manifest)
+    provider = FakeOcrProvider()
+    original = pipeline.build_epub
+    failures = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal failures
+        failures += 1
+        if failures == 1:
+            raise OSError("injected build interruption")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "build_epub", fail_once)
+    with pytest.raises(OSError, match="injected build"):
+        convert(
+            source,
+            store.output,
+            options,
+            ocr_provider=provider,
+            control=ConversionControl(store, manifest),
+        )
+    assert not list(store.output.glob("*.epub"))
+    outputs = convert(
+        source,
+        store.output,
+        options,
+        ocr_provider=provider,
+        control=ConversionControl(store, manifest),
+    )
+    assert outputs["epub"].is_file()
+    assert provider.calls == 1

@@ -7,8 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .analyzer import analyze_pdf
+from .checkpoints import ConversionControl
 from .epub import EpubValidationError, build_epub
-from .models import ConversionOptions
+from .models import ConversionOptions, JobState
 from .ocr import OcrProvider
 
 
@@ -54,10 +55,13 @@ def convert(
     options: ConversionOptions | None = None,
     progress: Callable[[str, int, int], None] | None = None,
     ocr_provider: OcrProvider | None = None,
+    control: ConversionControl | None = None,
 ) -> dict[str, Path]:
     options = options or ConversionOptions()
     output_dir.mkdir(parents=True, exist_ok=True)
-    document = analyze_pdf(input_pdf, output_dir, options, progress, ocr_provider)
+    document = analyze_pdf(
+        input_pdf, output_dir, options, progress, ocr_provider, control=control
+    )
     report_path = output_dir / "quality-report.json"
     _write_report(document, report_path)
     integrity = document.report()["integrity"]
@@ -82,6 +86,11 @@ def convert(
         )
     if progress:
         progress("Building EPUB", 0, 1)
+    if control is not None:
+        control.manifest.state = JobState.BUILDING
+        control.manifest.stage = "Building EPUB"
+        control.manifest.current_page = None
+        control.store.write_manifest(control.manifest)
     epub_path = output_dir / f"{input_pdf.stem}.epub"
     try:
         document.warnings.extend(

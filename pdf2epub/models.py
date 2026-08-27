@@ -31,6 +31,46 @@ class BlockType(StrEnum):
     LIST = "list"
 
 
+class JobState(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    PAUSE_REQUESTED = "pause_requested"
+    PAUSED = "paused"
+    BUILDING = "building"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+_JOB_TRANSITIONS = {
+    JobState.QUEUED: {JobState.PROCESSING, JobState.FAILED},
+    JobState.PROCESSING: {
+        JobState.PAUSE_REQUESTED,
+        JobState.BUILDING,
+        JobState.FAILED,
+        JobState.INTERRUPTED,
+    },
+    JobState.PAUSE_REQUESTED: {
+        JobState.PAUSED,
+        JobState.FAILED,
+        JobState.INTERRUPTED,
+    },
+    JobState.PAUSED: {JobState.PROCESSING, JobState.FAILED},
+    JobState.BUILDING: {
+        JobState.COMPLETE,
+        JobState.FAILED,
+        JobState.INTERRUPTED,
+    },
+    JobState.INTERRUPTED: {JobState.PROCESSING},
+    JobState.COMPLETE: set(),
+    JobState.FAILED: set(),
+}
+
+
+def can_transition(current: JobState, target: JobState) -> bool:
+    return target in _JOB_TRANSITIONS[current]
+
+
 @dataclass(slots=True)
 class TextQuality:
     score: float = 0.0
