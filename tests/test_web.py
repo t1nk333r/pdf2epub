@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from pdf2epub import web
 from pdf2epub.settings import clear_runtime_settings
-from pdf2epub.web import _quality_summary, _safe_pdf_name
+from pdf2epub.web import Job, _append_log, _quality_summary, _safe_pdf_name
 
 
 def test_quality_summary_omits_large_page_details():
@@ -95,3 +95,30 @@ def test_home_contains_settings_dialog():
     assert response.status_code == 200
     assert 'id="settings-button"' in response.text
     assert 'id="settings-dialog"' in response.text
+    assert 'id="log-stream"' in response.text
+
+
+def test_job_logs_are_structured_bounded_and_public(monkeypatch):
+    monkeypatch.setattr(web, "MAX_JOB_LOGS", 2)
+    job = Job("b" * 32)
+    _append_log(job, "Queued")
+    _append_log(job, "Analyzing page 1")
+    _append_log(job, "Finished", "success")
+
+    public = job.public()
+    assert "log_sequence" not in public
+    assert [entry["id"] for entry in public["logs"]] == [2, 3]
+    assert public["logs"][-1]["level"] == "success"
+    assert public["logs"][-1]["message"] == "Finished"
+
+
+def test_progress_updates_append_log_event():
+    job_id = "c" * 32
+    web.jobs[job_id] = Job(job_id)
+    try:
+        web._update(job_id, "Analyzing pages", 2, 10)
+        public = web.jobs[job_id].public()
+        assert public["percent"] == 20
+        assert public["logs"][-1]["message"] == "Analyzing pages — 2/10 (20%)"
+    finally:
+        web.jobs.pop(job_id, None)

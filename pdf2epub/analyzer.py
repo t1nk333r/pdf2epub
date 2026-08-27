@@ -440,9 +440,21 @@ def analyze_pdf(
             try:
                 if ocr_provider is None:
                     ocr_provider = create_ocr_provider(options.ocr_provider)
+                if progress:
+                    progress(
+                        f"OCR page {index + 1} via {ocr_provider.name}",
+                        index,
+                        len(doc),
+                    )
                 ocr_blocks, ocr_confidence, provider_name = _ocr_page(
                     page, options.render_dpi, options.ocr_language, ocr_provider
                 )
+                if progress:
+                    progress(
+                        f"OCR page {index + 1} completed via {provider_name}",
+                        index,
+                        len(doc),
+                    )
                 ocr_text = "\n".join(block.text for block in ocr_blocks)
                 ocr_quality = evaluate_text(ocr_text)
                 candidate_scores[f"ocr:{provider_name}"] = ocr_quality.score
