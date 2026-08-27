@@ -80,6 +80,13 @@ than only `127.0.0.1`. API keys entered through the cog are intentionally lost
 when the container restarts; put persistent secrets in the local `.env` file,
 which is excluded from the image and Git.
 
+### Jenkins
+
+The included `Jenkinsfile` validates the Compose configuration, builds a tagged
+Docker image, verifies EPUBCheck and the Arabic/English Tesseract languages, and
+runs the container health check. The Jenkins agent needs Docker with Compose v2
+and permission to access the Docker daemon.
+
 ## OCR providers
 
 OCR is selected page by page only when embedded PDF text is missing or unreliable. Questionable embedded and OCR candidates are compared and recorded in the quality report. A conversion fails instead of publishing a normal EPUB when required pages have no usable candidate. The web UI lists provider readiness, distinguishes local and remote processing, and requires confirmation before transmitting page images to a remote provider. API keys are never written to quality reports or returned by the settings API.
