@@ -523,3 +523,12 @@ def test_publication_failure_is_resumable_without_ocr_and_keeps_filename(
         assert not (store.output / "source.epub").exists()
     finally:
         web.jobs.pop(job_id, None)
+
+
+def test_startup_recovery_runs_through_lifespan(monkeypatch):
+    calls = []
+    monkeypatch.setattr(web, "_recover_jobs", lambda: calls.append(True))
+    with TestClient(web.app):
+        pass
+    assert calls == [True]
+    assert web.app.router.on_startup == []

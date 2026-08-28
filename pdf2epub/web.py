@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,7 +38,14 @@ from .ocr import (
 from .pipeline import ConversionIntegrityError, ConversionPublicationError, convert
 from .settings import clear_runtime_settings, public_settings, update_runtime_settings
 
-app = FastAPI(title="Arabic PDF → EPUB", version="0.3.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    _recover_jobs()
+    yield
+
+
+app = FastAPI(title="Arabic PDF → EPUB", version="0.3.0", lifespan=lifespan)
 JOB_ROOT = (
     Path(
         os.getenv(
@@ -439,11 +448,6 @@ def _recover_jobs() -> None:
             jobs[child.name] = _job_from_manifest(store, manifest)
         except CheckpointError:
             continue
-
-
-@app.on_event("startup")
-def startup_recovery() -> None:
-    _recover_jobs()
 
 
 @app.get("/", response_class=HTMLResponse)
