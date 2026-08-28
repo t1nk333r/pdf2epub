@@ -299,3 +299,54 @@ def test_epub_build_interruption_resumes_without_repeating_ocr(tmp_path, monkeyp
     )
     assert outputs["epub"].is_file()
     assert provider.calls == 1
+
+
+def test_resume_quarantines_corrupt_next_page_without_repeating_ocr(tmp_path):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    for _ in range(3):
+        pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+    options = ConversionOptions(
+        mode="force_ocr", preserve_images=False, require_epubcheck=False
+    )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    store = CheckpointStore(tmp_path / "jobs", "a" * 32)
+    store.initialize()
+    manifest = JobManifest(
+        id="a" * 32,
+        filename="scan.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=3,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract=processing_contract(source_hash, 3, options, "test_provider", None),
+        provider_id="test_provider",
+    )
+    store.write_manifest(manifest)
+    provider = FakeOcrProvider()
+    with pytest.raises(PauseRequested):
+        convert(
+            source,
+            store.output,
+            options,
+            ocr_provider=provider,
+            control=ConversionControl(store, manifest, pause_requested=lambda: True),
+        )
+    assert provider.calls == 1
+    store.checkpoint_path(2).write_text("{")
+
+    outputs = convert(
+        source,
+        store.output,
+        options,
+        ocr_provider=provider,
+        control=ConversionControl(store, manifest),
+    )
+    assert outputs["epub"].is_file()
+    assert provider.calls == 3
+    assert manifest.safe_pages == 3
+    assert len(list(store.checkpoints.glob(".corrupt-page-000002-*.json"))) == 1

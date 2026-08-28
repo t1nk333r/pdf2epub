@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from .models import (
     Block,
@@ -50,7 +51,7 @@ class ConversionControl:
 
     def page_committed(self, page: PageResult) -> None:
         self.store.write_page(page, self.manifest)
-        self.manifest.safe_pages = page.page
+        self.manifest.safe_pages = max(self.manifest.safe_pages, page.page)
         self.manifest.current_page = None
         self.store.write_manifest(self.manifest)
         if self.pause_requested():
@@ -353,6 +354,18 @@ class CheckpointStore:
             except CheckpointError:
                 if number <= manifest.safe_pages:
                     raise
+                quarantine = self.checkpoints / (
+                    f".corrupt-page-{number:06d}-{uuid4().hex[:12]}.json"
+                )
+                os.replace(target, quarantine)
+                try:
+                    directory_fd = os.open(self.checkpoints, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError:
+                    pass
                 break
         if manifest.safe_pages > len(pages):
             raise CheckpointError(

@@ -24,10 +24,11 @@ from .checkpoints import (
     PauseRequested,
     processing_contract,
 )
-from .models import ConversionOptions, JobState
+from .models import ConversionOptions, JobState, require_transition
 from .ocr import (
     OLLAMA_BOOK_MODELS,
     OLLAMA_QUALITY_MODEL,
+    OcrSettings,
     provider_descriptor,
     provider_names,
     provider_status,
@@ -109,7 +110,8 @@ class Job:
             "page_count": self.page_count,
             "can_pause": self.state == JobState.PROCESSING,
             "can_resume": self.state in {JobState.PAUSED, JobState.INTERRUPTED}
-            and not self.blocked_reason,
+            and self.blocked_code
+            in {None, "provider_unavailable", "publication_failed"},
             "eta_seconds": self._eta(),
         }
         data["percent"] = self.percent
@@ -147,13 +149,19 @@ def _append_log(job: Job, message: str, level: str = "info") -> None:
     job.updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _transition_job(job: Job, target: JobState) -> None:
+    job.state = require_transition(JobState(job.state), target)
+
+
 def _persist(job: Job) -> None:
     if not job.manifest or not job.store:
         return
     manifest = job.manifest
-    manifest.state = JobState(job.state)
+    target_state = JobState(job.state)
+    if manifest.state != target_state:
+        manifest.state = require_transition(manifest.state, target_state)
     manifest.stage = job.stage
-    manifest.safe_pages = job.safe_pages
+    job.safe_pages = max(job.safe_pages, manifest.safe_pages)
     manifest.current_page = job.current_page
     manifest.paused_at = job.paused_at
     manifest.completed_at = job.completed_at
@@ -170,6 +178,7 @@ def _persist(job: Job) -> None:
         {"process": PROCESS_ID, "token": job.worker_token} if job.worker_token else None
     )
     job.store.write_manifest(manifest)
+    job.safe_pages = manifest.safe_pages
 
 
 def _job_from_manifest(store: CheckpointStore, manifest: JobManifest) -> Job:
@@ -260,10 +269,8 @@ def _update(job_id: str, stage: str, done: int, total: int) -> None:
     with lock:
         job = jobs[job_id]
         if stage == "Building EPUB":
-            job.state = JobState.BUILDING
+            _transition_job(job, JobState.BUILDING)
             job.current_page = None
-        elif job.state not in {JobState.PAUSE_REQUESTED, JobState.BUILDING}:
-            job.state = JobState.PROCESSING
         changed = (job.stage, job.done, job.total) != (stage, done, total)
         job.stage, job.done, job.total = stage, done, total
         if changed:
@@ -287,7 +294,7 @@ def _run(job_id: str, pdf: Path, options: ConversionOptions) -> None:
     try:
         with lock:
             job = jobs[job_id]
-            job.state = JobState.PROCESSING
+            _transition_job(job, JobState.PROCESSING)
             job.pause_event.clear()
             _append_log(job, "Conversion worker started")
             _persist(job)
@@ -300,6 +307,7 @@ def _run(job_id: str, pdf: Path, options: ConversionOptions) -> None:
             options,
             lambda s, d, t: _update(job_id, s, d, t),
             control=control,
+            output_stem=Path(job.filename).stem,
         )
         report = json.loads(outputs["report"].read_text(encoding="utf-8"))
         stage = (
@@ -310,7 +318,8 @@ def _run(job_id: str, pdf: Path, options: ConversionOptions) -> None:
         with lock:
             job = jobs[job_id]
             job.outputs = {kind: str(path) for kind, path in outputs.items()}
-            job.state, job.stage, job.done, job.total = "complete", stage, 1, 1
+            _transition_job(job, JobState.COMPLETE)
+            job.stage, job.done, job.total = stage, 1, 1
             job.safe_pages = job.page_count
             job.completed_at = datetime.now().astimezone().isoformat(timespec="seconds")
             job.worker_token = None
@@ -321,26 +330,45 @@ def _run(job_id: str, pdf: Path, options: ConversionOptions) -> None:
             job = jobs[job_id]
             job.safe_pages = job.manifest.safe_pages
             job.current_page = None
-            job.state = JobState.PAUSED
+            _transition_job(job, JobState.PAUSED)
             job.stage = "Paused"
             job.paused_at = datetime.now().astimezone().isoformat(timespec="seconds")
             job.worker_token = None
             _append_log(job, "Paused after saving the current page", "success")
             _persist(job)
-    except (ConversionIntegrityError, ConversionPublicationError) as exc:
+    except ConversionIntegrityError as exc:
         with lock:
             job = jobs[job_id]
-            job.state = "failed"
+            _transition_job(job, JobState.FAILED)
             job.stage = "Content integrity failed"
             job.error = str(exc)
             job.outputs = {"report": str(exc.report_path)}
             _append_log(job, f"Content integrity failed — {exc}", "error")
             job.worker_token = None
             _persist(job)
+    except ConversionPublicationError as exc:
+        with lock:
+            job = jobs[job_id]
+            job.safe_pages = job.manifest.safe_pages
+            if job.safe_pages == job.page_count:
+                _transition_job(job, JobState.INTERRUPTED)
+                job.stage = "Publication interrupted"
+                job.blocked_code = "publication_failed"
+                job.blocked_reason = "اكتمل OCR، لكن تعذر بناء أو التحقق من EPUB. أصلح EPUBCheck ثم أعد المتابعة."
+                job.outputs = {"report": str(exc.report_path)}
+                _append_log(job, f"Publication interrupted — {exc}", "error")
+            else:
+                _transition_job(job, JobState.FAILED)
+                job.stage = "Publication failed"
+                job.error = str(exc)
+                job.outputs = {"report": str(exc.report_path)}
+                _append_log(job, f"Publication failed — {exc}", "error")
+            job.worker_token = None
+            _persist(job)
     except Exception as exc:  # noqa: BLE001 - background job boundary records all failures
         with lock:
             job = jobs[job_id]
-            job.state = "failed"
+            _transition_job(job, JobState.FAILED)
             job.stage = "Failed"
             job.error = str(exc)
             _append_log(job, f"Conversion failed — {exc}", "error")
@@ -384,7 +412,9 @@ def _recover_jobs() -> None:
                     JobState.PAUSE_REQUESTED,
                     JobState.BUILDING,
                 }:
-                    manifest.state = JobState.INTERRUPTED
+                    manifest.state = require_transition(
+                        manifest.state, JobState.INTERRUPTED
+                    )
                 manifest.stage = "Recovery blocked"
                 manifest.current_page = None
                 manifest.lease = None
@@ -398,7 +428,9 @@ def _recover_jobs() -> None:
                 JobState.PAUSE_REQUESTED,
                 JobState.BUILDING,
             }:
-                manifest.state = JobState.INTERRUPTED
+                manifest.state = require_transition(
+                    manifest.state, JobState.INTERRUPTED
+                )
                 manifest.stage = "Interrupted"
                 manifest.current_page = None
                 manifest.lease = None
@@ -590,7 +622,7 @@ def create_job(
         try:
             _start_worker(job, pdf, options)
         except Exception as exc:
-            job.state = JobState.FAILED
+            _transition_job(job, JobState.FAILED)
             job.error = str(exc)
             job.stage = "Failed"
             _persist(job)
@@ -625,7 +657,7 @@ def pause_job(job_id: str) -> dict:
                 409,
                 {"code": "cannot_pause", "message": "لا يمكن إيقاف هذه المهمة مؤقتاً"},
             )
-        job.state = JobState.PAUSE_REQUESTED
+        _transition_job(job, JobState.PAUSE_REQUESTED)
         job.stage = "Pause requested"
         job.pause_event.set()
         _append_log(job, "Pause requested; finishing the current page")
@@ -645,24 +677,26 @@ def resume_job(job_id: str) -> dict:
             raise HTTPException(
                 409, {"code": "cannot_resume", "message": "لا يمكن متابعة هذه المهمة"}
             )
-        descriptor = next(
-            (
-                item
-                for item in provider_status()
-                if item["id"] == job.manifest.provider_id
-            ),
-            None,
-        )
-        if not descriptor or not descriptor.get("ready"):
-            job.blocked_code = "provider_unavailable"
-            job.blocked_reason = (
-                "محرك OCR أو النموذج المحدد غير جاهز؛ أعد توفيره ثم حاول مجدداً."
+        if job.manifest.safe_pages < job.manifest.page_count:
+            settings = None
+            if job.manifest.provider_id == "ollama":
+                settings = OcrSettings.from_env()
+                settings.ollama_model = job.manifest.model or settings.ollama_model
+            statuses = provider_status(settings) if settings else provider_status()
+            descriptor = next(
+                (item for item in statuses if item["id"] == job.manifest.provider_id),
+                None,
             )
-            _persist(job)
-            raise HTTPException(
-                422,
-                {"code": job.blocked_code, "message": job.blocked_reason},
-            )
+            if not descriptor or not descriptor.get("ready"):
+                job.blocked_code = "provider_unavailable"
+                job.blocked_reason = (
+                    "محرك OCR أو النموذج المحدد غير جاهز؛ أعد توفيره ثم حاول مجدداً."
+                )
+                _persist(job)
+                raise HTTPException(
+                    422,
+                    {"code": job.blocked_code, "message": job.blocked_reason},
+                )
         try:
             job.store.contiguous_pages(job.manifest)
         except CheckpointError as exc:
@@ -714,7 +748,7 @@ def resume_job(job_id: str) -> dict:
                 422, {"code": job.blocked_code, "message": job.blocked_reason}
             )
         job.blocked_code = job.blocked_reason = None
-        job.state = JobState.PROCESSING
+        _transition_job(job, JobState.PROCESSING)
         job.stage = "Resuming"
         job.paused_at = None
         _append_log(job, "Conversion resumed")
@@ -791,7 +825,7 @@ const form=document.querySelector('#form'),statusBox=document.querySelector('#st
 let run=0,providers=[],lastLogId=0,activeJob=null;
 const stateLabels={queued:'في الانتظار',processing:'قيد المعالجة',pause_requested:'جارٍ طلب الإيقاف',paused:'متوقف مؤقتاً',interrupted:'جاهز للاستعادة',building:'تجميع EPUB',complete:'مكتمل',failed:'فشل'};
 const sourceLabels={runtime:'من صفحة الإعدادات',environment:'من ملف .env',default:'قيمة افتراضية'};
-async function jsonRequest(url,options={}){const response=await fetch(url,options);const data=await response.json();if(!response.ok)throw new Error(data.detail||'تعذر إكمال الطلب');return data}
+async function jsonRequest(url,options={}){const response=await fetch(url,options);const data=await response.json();if(!response.ok){const detail=data.detail;throw new Error(typeof detail==='object'&&detail?detail.message:(detail||'تعذر إكمال الطلب'))}return data}
 function renderWarnings(warnings){capabilityWarnings.replaceChildren();for(const warning of warnings){const message=document.createElement('p');message.className='capability-warning'+(warning.severity==='error'?' error-level':'');message.textContent=warning.message;capabilityWarnings.append(message)}capabilityWarnings.classList.toggle('hidden',warnings.length===0)}
 async function loadHealth(){try{const data=await jsonRequest('/api/health');renderWarnings(data.warnings||[])}catch(error){renderWarnings([{severity:'warning',message:'تعذر التحقق من جاهزية أدوات النشر وOCR: '+error.message}])}}
 function updateModelVisibility(){document.querySelector('#ollama-model-row').classList.toggle('hidden',providerSelect.value!=='ollama')}
@@ -805,7 +839,8 @@ document.querySelector('#settings-reset').onclick=async()=>{if(!confirm('حذف 
 function renderLogs(logs=[]){let appended=false;for(const entry of logs){if(entry.id<=lastLogId)continue;const line=document.createElement('div');line.className='log-line '+entry.level;const time=document.createElement('span');time.className='log-time';const parsed=new Date(entry.timestamp);time.textContent=Number.isNaN(parsed.getTime())?entry.timestamp:parsed.toLocaleTimeString('ar-SA');const message=document.createElement('span');message.className='log-message';message.textContent=entry.message;line.append(time,message);logStream.append(line);lastLogId=entry.id;appended=true}if(appended)logStream.scrollTop=logStream.scrollHeight}
 function durationLabel(seconds){if(seconds==null)return'';const minutes=Math.max(1,Math.round(seconds/60));return'الوقت المتبقي التقريبي: '+minutes+' دقيقة'}
 function renderJobState(data){activeJob=data.id;document.querySelector('#stage').textContent=stateLabels[data.state]||data.stage;document.querySelector('#progress').style.width=data.percent+'%';document.querySelector('#percent').textContent=data.percent+'%';document.querySelector('#safe-progress').textContent='تم حفظ '+data.safe_pages+' من '+data.page_count+' صفحة بأمان';document.querySelector('#current-activity').textContent=data.current_page?'تتم معالجة الصفحة '+data.current_page:'';document.querySelector('#eta').textContent=durationLabel(data.eta_seconds);const message=document.querySelector('#state-message');message.className='state-banner '+data.state;const messages={processing:'يمكن طلب الإيقاف المؤقت؛ ستكتمل الصفحة الحالية وتُحفظ أولاً.',pause_requested:'سيتم الإيقاف بعد حفظ الصفحة الحالية.',paused:'يمكن إغلاق المتصفح أو إعادة تشغيل الجهاز؛ سيبقى التقدم المحفوظ.',interrupted:'توقف التشغيل السابق. آخر نقطة حفظ مكتملة آمنة، والمتابعة تحتاج إلى تأكيدك.',building:'اكتمل OCR ويجري الآن تجميع EPUB والتحقق منه. يمكن إعادة البناء من الصفحات المحفوظة بعد إعادة التشغيل.',failed:data.blocked_reason||data.error||'فشل التحويل.',complete:'اكتمل التحويل بنجاح.'};message.textContent=messages[data.state]||data.stage;pauseButton.classList.toggle('hidden',!['processing','pause_requested'].includes(data.state));pauseButton.disabled=data.state!=='processing';resumeButton.classList.toggle('hidden',!['paused','interrupted'].includes(data.state));resumeButton.disabled=!data.can_resume;statusBox.setAttribute('aria-busy',data.state==='pause_requested'?'true':'false');renderLogs(data.logs)}
-async function loadJobs(){try{const data=await jsonRequest('/api/jobs');jobList.replaceChildren();if(!data.jobs.length){jobList.innerHTML='<p>لا توجد تحويلات محفوظة بعد.</p>';return}for(const job of data.jobs){const card=document.createElement('article');card.className='job-card';const head=document.createElement('div');head.className='job-head';const name=document.createElement('strong');name.textContent=job.filename;const badge=document.createElement('span');badge.className='badge '+job.state;badge.textContent=stateLabels[job.state]||job.state;head.append(name,badge);const saved=document.createElement('p');saved.textContent='تم حفظ '+job.safe_pages+' من '+job.page_count+' صفحة بأمان';const activity=document.createElement('p');activity.textContent=job.current_page?'تتم معالجة الصفحة '+job.current_page:'آخر تحديث: '+new Date(job.updated_at||job.created_at).toLocaleString('ar-SA');const actions=document.createElement('div');actions.className='job-actions';const view=document.createElement('button');view.type='button';view.textContent=job.state==='complete'?'تنزيل':'عرض';view.onclick=()=>openJob(job.id);actions.append(view);card.append(head,saved,activity,actions);jobList.append(card)}}catch(error){jobList.textContent='تعذر تحميل التحويلات: '+error.message}}
+async function dashboardAction(job,action){openJob(job.id);const button=action==='pause'?pauseButton:resumeButton;button.disabled=true;try{renderJobState(await jsonRequest('/api/jobs/'+job.id+'/'+action,{method:'POST'}));poll(job.id,run);loadJobs()}catch(error){showError(error.message);button.disabled=false}}
+async function loadJobs(){try{const data=await jsonRequest('/api/jobs');jobList.replaceChildren();if(!data.jobs.length){jobList.innerHTML='<p>لا توجد تحويلات محفوظة بعد.</p>';return}for(const job of data.jobs){const card=document.createElement('article');card.className='job-card';const head=document.createElement('div');head.className='job-head';const name=document.createElement('strong');name.textContent=job.filename;const badge=document.createElement('span');badge.className='badge '+job.state;badge.textContent=stateLabels[job.state]||job.state;head.append(name,badge);const saved=document.createElement('p');saved.textContent='تم حفظ '+job.safe_pages+' من '+job.page_count+' صفحة بأمان';const activity=document.createElement('p');activity.textContent=job.current_page?'تتم معالجة الصفحة '+job.current_page:'آخر تحديث: '+new Date(job.updated_at||job.created_at).toLocaleString('ar-SA');const actions=document.createElement('div');actions.className='job-actions';if(job.state==='processing'){const primary=document.createElement('button');primary.type='button';primary.textContent='إيقاف مؤقت';primary.onclick=()=>dashboardAction(job,'pause');actions.append(primary)}else if(['paused','interrupted'].includes(job.state)&&job.can_resume){const primary=document.createElement('button');primary.type='button';primary.textContent='متابعة التحويل';primary.onclick=()=>dashboardAction(job,'resume');actions.append(primary)}const view=document.createElement('button');view.type='button';view.className='secondary';view.textContent=job.state==='complete'?'تنزيل':'عرض';view.onclick=()=>openJob(job.id);actions.append(view);card.append(head,saved,activity,actions);jobList.append(card)}}catch(error){jobList.textContent='تعذر تحميل التحويلات: '+error.message}}
 function openJob(id){const current=++run;activeJob=id;lastLogId=0;logStream.replaceChildren();history.replaceState(null,'','?job='+encodeURIComponent(id));localStorage.setItem('pdf2epub-active-job',id);statusBox.classList.remove('hidden');form.classList.add('hidden');poll(id,current)}
 form.onsubmit=async event=>{event.preventDefault();const selected=providers.find(provider=>provider.id===providerSelect.value);if(!selected||!selected.ready){alert('اختر محرك OCR جاهزاً من الإعدادات.');return}if(selected.remote&&!confirm('سيتم إرسال صور الصفحات التي تحتاج إلى OCR إلى خدمة خارجية. هل تريد المتابعة؟'))return;const body=new FormData(form);body.set('remote_acknowledged',selected.remote?'true':'false');for(const name of ['preserve_images','detect_chapters','detect_footnotes','fix_bidi','ocr_bad_pages'])body.set(name,form.elements[name].checked?'true':'false');try{const data=await jsonRequest('/api/jobs',{method:'POST',body});openJob(data.job_id);loadJobs()}catch(error){showError(error.message)}};
 async function poll(id,current){if(current!==run)return;try{const data=await jsonRequest('/api/jobs/'+id);renderJobState(data);if(data.state==='failed'){if(data.downloads&&data.downloads.report)document.querySelector('#links').innerHTML='<a class="download" href="'+data.downloads.report+'">تنزيل تقرير المشكلة</a>';showError(data.error);return}if(data.state==='complete'){document.querySelector('#links').innerHTML='<a class="download" href="'+data.downloads.epub+'">تنزيل EPUB</a> <a class="download" href="'+data.downloads.report+'">تقرير الجودة</a>';const report=document.querySelector('#report');report.classList.remove('hidden');report.textContent=JSON.stringify(data.quality,null,2);restart.classList.remove('hidden');loadJobs();return}setTimeout(()=>poll(id,current),800)}catch(error){history.replaceState(null,'',location.pathname);localStorage.removeItem('pdf2epub-active-job');showError('تعذر العثور على التحويل المطلوب: '+error.message);form.classList.remove('hidden');loadJobs()}}

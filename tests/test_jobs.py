@@ -141,6 +141,8 @@ def test_corrupt_next_checkpoint_preserves_contiguous_prefix(tmp_path):
     store.write_manifest(item)
     store.checkpoint_path(2).write_text("{")
     assert [saved.page for saved in store.contiguous_pages(item)] == [1]
+    assert not store.checkpoint_path(2).exists()
+    assert len(list(store.checkpoints.glob(".corrupt-page-000002-*.json"))) == 1
 
 
 def test_corrupt_safe_checkpoint_blocks_resume(tmp_path):

@@ -9,7 +9,7 @@ from pathlib import Path
 from .analyzer import analyze_pdf
 from .checkpoints import ConversionControl
 from .epub import EpubValidationError, build_epub
-from .models import ConversionOptions, JobState
+from .models import ConversionOptions, JobState, require_transition
 from .ocr import OcrProvider
 
 
@@ -56,6 +56,7 @@ def convert(
     progress: Callable[[str, int, int], None] | None = None,
     ocr_provider: OcrProvider | None = None,
     control: ConversionControl | None = None,
+    output_stem: str | None = None,
 ) -> dict[str, Path]:
     options = options or ConversionOptions()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -87,11 +88,13 @@ def convert(
     if progress:
         progress("Building EPUB", 0, 1)
     if control is not None:
-        control.manifest.state = JobState.BUILDING
+        control.manifest.state = require_transition(
+            control.manifest.state, JobState.BUILDING
+        )
         control.manifest.stage = "Building EPUB"
         control.manifest.current_page = None
         control.store.write_manifest(control.manifest)
-    epub_path = output_dir / f"{input_pdf.stem}.epub"
+    epub_path = output_dir / f"{output_stem or input_pdf.stem}.epub"
     try:
         document.warnings.extend(
             build_epub(document, epub_path, validate=options.require_epubcheck)

@@ -2,14 +2,27 @@ import hashlib
 import json
 import threading
 from dataclasses import asdict
+from pathlib import Path
 
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
-from pdf2epub import web
-from pdf2epub.checkpoints import CheckpointStore, JobManifest, processing_contract
-from pdf2epub.models import ConversionOptions, JobState
+from pdf2epub import pipeline, web
+from pdf2epub.checkpoints import (
+    CheckpointStore,
+    ConversionControl,
+    JobManifest,
+    processing_contract,
+)
+from pdf2epub.epub import EpubValidationError
+from pdf2epub.models import (
+    ConversionOptions,
+    JobState,
+    PageResult,
+    PageType,
+)
+from pdf2epub.ocr import OcrResult
 from pdf2epub.settings import clear_runtime_settings
 from pdf2epub.web import Job, _append_log, _quality_summary, _safe_pdf_name
 
@@ -179,6 +192,9 @@ def test_home_contains_settings_dialog(client):
     assert "aria-busy" in response.text
     assert "new URLSearchParams(location.search)" in response.text
     assert "localStorage.getItem('pdf2epub-active-job')" in response.text
+    assert "typeof detail==='object'&&detail?detail.message" in response.text
+    assert "dashboardAction(job,'pause')" in response.text
+    assert "dashboardAction(job,'resume')" in response.text
 
 
 def test_job_logs_are_structured_bounded_and_public(monkeypatch):
@@ -356,5 +372,154 @@ def test_create_job_persists_source_contract_before_worker(
         )
         assert item.page_count == 1
         assert "API_KEY" not in json.dumps(item.to_dict())
+    finally:
+        web.jobs.pop(job_id, None)
+
+
+def test_stale_pause_persistence_cannot_lower_committed_safe_pages(tmp_path):
+    job = _persistent_job(tmp_path, JobState.PROCESSING)
+    try:
+        page = PageResult(1, PageType.TEXT, "embedded_text", 100, 100)
+        ConversionControl(job.store, job.manifest).page_committed(page)
+        job.safe_pages = 0
+        web._persist(job)
+        assert job.safe_pages == 1
+        assert job.manifest.safe_pages == 1
+        assert job.store.load_manifest().safe_pages == 1
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_illegal_production_state_transition_is_rejected():
+    job = Job("e" * 32, state=JobState.COMPLETE)
+    with pytest.raises(ValueError, match="Illegal job state transition"):
+        web._transition_job(job, JobState.PROCESSING)
+
+
+def test_resume_checks_exact_manifest_ollama_model_and_can_retry(
+    client, tmp_path, monkeypatch
+):
+    job = _persistent_job(tmp_path)
+    alternate = "qwen3-vl:30b-instruct-gpu"
+    options = ConversionOptions(
+        ocr_provider="ollama", ollama_model=alternate, require_epubcheck=False
+    )
+    job.manifest.provider_id = "ollama"
+    job.manifest.model = alternate
+    job.manifest.options = asdict(options)
+    job.manifest.contract = processing_contract(
+        job.manifest.source_sha256,
+        job.manifest.page_count,
+        options,
+        "ollama",
+        alternate,
+    )
+    job.store.write_manifest(job.manifest)
+    available = False
+    checked_models = []
+
+    def statuses(settings=None):
+        model = settings.ollama_model if settings else web.OLLAMA_QUALITY_MODEL
+        checked_models.append(model)
+        return [{"id": "ollama", "ready": available and model == alternate}]
+
+    monkeypatch.setattr(web, "provider_status", statuses)
+
+    def fake_start(runtime, pdf, selected_options):
+        runtime.thread = type("Thread", (), {"is_alive": lambda self: True})()
+
+    monkeypatch.setattr(web, "_start_worker", fake_start)
+    try:
+        blocked = client.post(f"/api/jobs/{job.id}/resume")
+        assert blocked.status_code == 422
+        assert blocked.json()["detail"]["code"] == "provider_unavailable"
+        assert checked_models[-1] == alternate
+        assert job.public()["can_resume"] is True
+
+        available = True
+        resumed = client.post(f"/api/jobs/{job.id}/resume")
+        assert resumed.status_code == 200
+        assert resumed.json()["state"] == "processing"
+        assert resumed.json()["blocked_reason"] is None
+        assert checked_models[-1] == alternate
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+class CountingWebProvider:
+    name = "web_test"
+
+    def __init__(self):
+        self.calls = 0
+
+    def recognize(self, image_png: bytes, language: str) -> OcrResult:
+        self.calls += 1
+        return OcrResult("هذا نص عربي صالح من الصفحة.", 0.99, self.name)
+
+
+def test_publication_failure_is_resumable_without_ocr_and_keeps_filename(
+    tmp_path, monkeypatch
+):
+    job_id = "f" * 32
+    store = CheckpointStore(tmp_path, job_id)
+    store.initialize()
+    source = store.root / "source.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(source)
+    document.close()
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    options = ConversionOptions(
+        mode="force_ocr", preserve_images=False, require_epubcheck=True
+    )
+    manifest = JobManifest(
+        id=job_id,
+        filename="كتاب.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=1,
+        state=JobState.QUEUED,
+        stage="Waiting",
+        options=asdict(options),
+        contract=processing_contract(source_hash, 1, options, "web_test", None),
+        provider_id="web_test",
+    )
+    store.write_manifest(manifest)
+    job = web._job_from_manifest(store, manifest)
+    web.jobs[job_id] = job
+    provider = CountingWebProvider()
+    original_convert = pipeline.convert
+
+    def convert_with_provider(*args, **kwargs):
+        return original_convert(*args, ocr_provider=provider, **kwargs)
+
+    monkeypatch.setattr(web, "convert", convert_with_provider)
+    original_build = pipeline.build_epub
+    builds = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        if builds == 1:
+            raise EpubValidationError("EPUBCheck unavailable")
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "build_epub", fail_once)
+    try:
+        web._run(job_id, source, options)
+        assert job.state == "interrupted"
+        assert job.blocked_code == "publication_failed"
+        assert job.safe_pages == 1
+        assert provider.calls == 1
+        assert set(job.outputs) == {"report"}
+
+        response = web.resume_job(job_id)
+        assert response["state"] == "processing"
+        job.thread.join(timeout=5)
+        assert not job.thread.is_alive()
+        assert job.state == "complete"
+        assert provider.calls == 1
+        assert Path(job.outputs["epub"]).name == "كتاب.epub"
+        assert not (store.output / "source.epub").exists()
     finally:
         web.jobs.pop(job_id, None)

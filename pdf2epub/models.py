@@ -71,6 +71,14 @@ def can_transition(current: JobState, target: JobState) -> bool:
     return target in _JOB_TRANSITIONS[current]
 
 
+def require_transition(current: JobState, target: JobState) -> JobState:
+    if current == target:
+        return target
+    if not can_transition(current, target):
+        raise ValueError(f"Illegal job state transition: {current} -> {target}")
+    return target
+
+
 @dataclass(slots=True)
 class TextQuality:
     score: float = 0.0
