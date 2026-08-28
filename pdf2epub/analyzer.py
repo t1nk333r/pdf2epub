@@ -455,244 +455,244 @@ def analyze_pdf(
     image_dir = control.store.images if control is not None else work_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
     try:
-      for index, page in enumerate(doc):
-        if index < len(result.pages):
-            continue
-        if control is not None:
-            control.manifest.current_page = index + 1
-            control.store.write_manifest(control.manifest)
-        if progress:
-            progress("Analyzing pages", index, len(doc))
-        blocks = _raw_blocks(page)
-        embedded = "\n".join(b.text for b in blocks)
-        quality = evaluate_text(embedded)
-        embedded_blocks = blocks
-        embedded_has_severe_issue = _has_severe_text_issue(embedded_blocks)
-        images = page.get_images(full=True)
-        page_area = max(page.rect.width * page.rect.height, 1)
-        image_area = 0.0
-        for info in images:
-            try:
-                image_area += sum(
-                    rect.width * rect.height for rect in page.get_image_rects(info[0])
-                )
-            except Exception:  # noqa: BLE001, S110 - malformed PDF image metadata varies
-                pass
-        image_heavy = bool(images and image_area > page_area * 0.35)
-        source = "embedded_text"
-        kind = PageType.TEXT
-        selection = PageSelection.EMBEDDED
-        selection_reason = "Embedded text passed the quality policy"
-        candidate_scores = {"embedded_text": quality.score}
-        candidates = {
-            "embedded_text": {
-                "text": embedded,
-                "score": quality.score,
-                "reasons": quality.reasons,
-            }
-        }
-        selected_quality = quality
-        try:
-            intentional_blank = (
-                options.mode != "force_ocr"
-                and not embedded
-                and not images
-                and not page.get_drawings()
-            )
-        except Exception:  # noqa: BLE001 - malformed drawing streams are not blank proof
-            intentional_blank = False
-        use_ocr = not intentional_blank and (
-            options.mode == "force_ocr"
-            or not embedded
-            or (
-                options.mode == "automatic"
-                and options.ocr_bad_pages
-                and (
-                    quality.score < options.acceptable_threshold
-                    or embedded_has_severe_issue
-                )
-            )
-        )
-        warnings: list[str] = []
-        ocr_confidence = None
-        ocr_metrics: dict = {}
-        if intentional_blank:
-            blocks = []
-            source = "intentional_blank"
-            kind = PageType.TEXT
-            selection = PageSelection.INTENTIONAL_BLANK
-            selection_reason = "No text, images, or vector drawings were present"
-        elif use_ocr:
-            try:
-                if ocr_provider is None:
-                    ocr_provider = create_ocr_provider(
-                        options.ocr_provider, ollama_model=options.ollama_model
-                    )
-                if progress:
-                    progress(
-                        f"OCR page {index + 1} via {ocr_provider.name}",
-                        index,
-                        len(doc),
-                    )
-                ocr_blocks, ocr_confidence, provider_name, ocr_metrics = _ocr_page(
-                    page, options.render_dpi, options.ocr_language, ocr_provider
-                )
-                if progress:
-                    attempts = ocr_metrics.get("attempts") or [ocr_metrics]
-                    attempt_log = "; ".join(
-                        f"model={attempt.get('model') or provider_name} "
-                        f"prompt_eval_count={attempt.get('prompt_eval_count') or 0} "
-                        f"eval_count={attempt.get('eval_count') or 0} "
-                        f"total_duration={attempt.get('duration_seconds') or 0}s "
-                        f"retries={attempt.get('retries') or 0}"
-                        for attempt in attempts
-                    )
-                    fallback = (
-                        f"; fallback_used=yes; reason={ocr_metrics['fallback_reason']}"
-                        if ocr_metrics.get("fallback_reason")
-                        else "; fallback_used=no"
-                    )
-                    progress(
-                        f"OCR page {index + 1} completed — {attempt_log}{fallback}",
-                        index,
-                        len(doc),
-                    )
-                ocr_text = "\n".join(block.text for block in ocr_blocks)
-                ocr_quality = evaluate_text(ocr_text)
-                candidate_scores[f"ocr:{provider_name}"] = ocr_quality.score
-                candidates[f"ocr:{provider_name}"] = {
-                    "text": ocr_text,
-                    "score": ocr_quality.score,
-                    "reasons": ocr_quality.reasons,
-                    "confidence": ocr_confidence,
-                    "metrics": ocr_metrics,
-                }
-                ocr_has_severe_issue = _has_severe_text_issue(ocr_blocks)
-                choose_ocr = bool(ocr_blocks) and (
-                    options.mode == "force_ocr"
-                    or (
-                        not embedded
-                        and not ocr_has_severe_issue
-                        and ocr_quality.score >= options.acceptable_threshold
-                    )
-                    or (
-                        embedded_has_severe_issue
-                        and not ocr_has_severe_issue
-                        and ocr_quality.score >= options.acceptable_threshold
-                    )
-                    or ocr_quality.score >= quality.score + 0.08
-                )
-                if choose_ocr:
-                    blocks = ocr_blocks
-                    selected_quality = ocr_quality
-                    source = f"ocr:{provider_name}"
-                    kind = PageType.SCAN if not embedded else PageType.BROKEN_TEXT
-                    selection = PageSelection.OCR
-                    selection_reason = (
-                        "OCR was the only usable candidate"
-                        if not embedded
-                        else "OCR passed quality checks that embedded text failed"
-                    )
-                elif embedded:
-                    blocks = embedded_blocks
-                    source = "embedded_text"
-                    kind = PageType.BROKEN_TEXT
-                    selection = PageSelection.REVIEW
-                    selection_reason = "OCR did not provide a clearly safer candidate"
-                    warnings.append(
-                        "Embedded and OCR candidates require review; retained embedded text"
-                    )
-                else:
-                    blocks = []
-                    source = "unavailable"
-                    kind = PageType.SCAN
-                    selection = PageSelection.UNAVAILABLE
-                    selection_reason = "OCR returned no usable text"
-                    warnings.append("OCR returned no usable text")
-            except (MissingDependency, OcrError) as exc:
-                if progress:
-                    progress(
-                        f"OCR page {index + 1} failed — {exc}", index, len(doc)
-                    )
-                if embedded:
-                    blocks = embedded_blocks
-                    warnings.append(
-                        f"OCR unavailable; retained low-quality embedded text: {exc}"
-                    )
-                    kind = PageType.BROKEN_TEXT
-                    selection = PageSelection.REVIEW
-                    selection_reason = (
-                        "OCR was unavailable for questionable embedded text"
-                    )
-                else:
-                    warnings.append(str(exc))
-                    blocks = []
-                    source = "unavailable"
-                    kind = PageType.SCAN
-                    selection = PageSelection.UNAVAILABLE
-                    selection_reason = "No embedded text and OCR was unavailable"
-        elif quality.score < options.good_threshold:
-            kind = PageType.BROKEN_TEXT
-            selection = PageSelection.REVIEW
-            selection_reason = "Embedded text is below the good-quality threshold"
-            warnings.append("Embedded text is only moderately reliable")
-        elif image_heavy:
-            kind = PageType.HYBRID if embedded else PageType.IMAGE_HEAVY
-        blocks = _reading_order(blocks, page.rect.width)
-        _classify_structure(blocks, page.rect.height, options)
-        _merge_paragraph_lines(blocks)
-        if options.preserve_images and selection in {
-            PageSelection.EMBEDDED,
-            PageSelection.REVIEW,
-        }:
-            for image_index, info in enumerate(images):
+        for index, page in enumerate(doc):
+            if index < len(result.pages):
+                continue
+            if control is not None:
+                control.manifest.current_page = index + 1
+                control.store.write_manifest(control.manifest)
+            if progress:
+                progress("Analyzing pages", index, len(doc))
+            blocks = _raw_blocks(page)
+            embedded = "\n".join(b.text for b in blocks)
+            quality = evaluate_text(embedded)
+            embedded_blocks = blocks
+            embedded_has_severe_issue = _has_severe_text_issue(embedded_blocks)
+            images = page.get_images(full=True)
+            page_area = max(page.rect.width * page.rect.height, 1)
+            image_area = 0.0
+            for info in images:
                 try:
-                    if not _is_safe_figure_image(page, info[0], image_area, page_area):
-                        continue
-                    extracted = doc.extract_image(info[0])
-                    if len(extracted["image"]) < 4096:
-                        continue
-                    target = _save_epub_image(
-                        doc,
-                        info[0],
-                        image_dir,
-                        f"page-{index + 1:04d}-{image_index + 1}",
+                    image_area += sum(
+                        rect.width * rect.height for rect in page.get_image_rects(info[0])
                     )
-                    result.images.append(target)
-                    blocks.append(
-                        Block(
-                            BlockType.IMAGE,
-                            image_path=target.name,
-                            source="embedded_image",
-                        )
+                except Exception:  # noqa: BLE001, S110 - malformed PDF image metadata varies
+                    pass
+            image_heavy = bool(images and image_area > page_area * 0.35)
+            source = "embedded_text"
+            kind = PageType.TEXT
+            selection = PageSelection.EMBEDDED
+            selection_reason = "Embedded text passed the quality policy"
+            candidate_scores = {"embedded_text": quality.score}
+            candidates = {
+                "embedded_text": {
+                    "text": embedded,
+                    "score": quality.score,
+                    "reasons": quality.reasons,
+                }
+            }
+            selected_quality = quality
+            try:
+                intentional_blank = (
+                    options.mode != "force_ocr"
+                    and not embedded
+                    and not images
+                    and not page.get_drawings()
+                )
+            except Exception:  # noqa: BLE001 - malformed drawing streams are not blank proof
+                intentional_blank = False
+            use_ocr = not intentional_blank and (
+                options.mode == "force_ocr"
+                or not embedded
+                or (
+                    options.mode == "automatic"
+                    and options.ocr_bad_pages
+                    and (
+                        quality.score < options.acceptable_threshold
+                        or embedded_has_severe_issue
                     )
-                except Exception as exc:  # noqa: BLE001 - one corrupt image must not abort a book
-                    warnings.append(
-                        f"Could not preserve image {image_index + 1}: {exc}"
-                    )
-        page_result = PageResult(
-                index + 1,
-                kind,
-                source,
-                page.rect.width,
-                page.rect.height,
-                page.rotation,
-                blocks,
-                selected_quality,
-                ocr_confidence,
-                warnings,
-                selection,
-                selection_reason,
-                candidate_scores,
-                candidates,
-                ocr_metrics,
+                )
             )
-        result.pages.append(page_result)
-        if control is not None:
-            control.page_committed(page_result)
-      _remove_repeated_margins(result)
-      if progress:
-          progress("Analyzing pages", len(doc), len(doc))
-      return result
+            warnings: list[str] = []
+            ocr_confidence = None
+            ocr_metrics: dict = {}
+            if intentional_blank:
+                blocks = []
+                source = "intentional_blank"
+                kind = PageType.TEXT
+                selection = PageSelection.INTENTIONAL_BLANK
+                selection_reason = "No text, images, or vector drawings were present"
+            elif use_ocr:
+                try:
+                    if ocr_provider is None:
+                        ocr_provider = create_ocr_provider(
+                            options.ocr_provider, ollama_model=options.ollama_model
+                        )
+                    if progress:
+                        progress(
+                            f"OCR page {index + 1} via {ocr_provider.name}",
+                            index,
+                            len(doc),
+                        )
+                    ocr_blocks, ocr_confidence, provider_name, ocr_metrics = _ocr_page(
+                        page, options.render_dpi, options.ocr_language, ocr_provider
+                    )
+                    if progress:
+                        attempts = ocr_metrics.get("attempts") or [ocr_metrics]
+                        attempt_log = "; ".join(
+                            f"model={attempt.get('model') or provider_name} "
+                            f"prompt_eval_count={attempt.get('prompt_eval_count') or 0} "
+                            f"eval_count={attempt.get('eval_count') or 0} "
+                            f"total_duration={attempt.get('duration_seconds') or 0}s "
+                            f"retries={attempt.get('retries') or 0}"
+                            for attempt in attempts
+                        )
+                        fallback = (
+                            f"; fallback_used=yes; reason={ocr_metrics['fallback_reason']}"
+                            if ocr_metrics.get("fallback_reason")
+                            else "; fallback_used=no"
+                        )
+                        progress(
+                            f"OCR page {index + 1} completed — {attempt_log}{fallback}",
+                            index,
+                            len(doc),
+                        )
+                    ocr_text = "\n".join(block.text for block in ocr_blocks)
+                    ocr_quality = evaluate_text(ocr_text)
+                    candidate_scores[f"ocr:{provider_name}"] = ocr_quality.score
+                    candidates[f"ocr:{provider_name}"] = {
+                        "text": ocr_text,
+                        "score": ocr_quality.score,
+                        "reasons": ocr_quality.reasons,
+                        "confidence": ocr_confidence,
+                        "metrics": ocr_metrics,
+                    }
+                    ocr_has_severe_issue = _has_severe_text_issue(ocr_blocks)
+                    choose_ocr = bool(ocr_blocks) and (
+                        options.mode == "force_ocr"
+                        or (
+                            not embedded
+                            and not ocr_has_severe_issue
+                            and ocr_quality.score >= options.acceptable_threshold
+                        )
+                        or (
+                            embedded_has_severe_issue
+                            and not ocr_has_severe_issue
+                            and ocr_quality.score >= options.acceptable_threshold
+                        )
+                        or ocr_quality.score >= quality.score + 0.08
+                    )
+                    if choose_ocr:
+                        blocks = ocr_blocks
+                        selected_quality = ocr_quality
+                        source = f"ocr:{provider_name}"
+                        kind = PageType.SCAN if not embedded else PageType.BROKEN_TEXT
+                        selection = PageSelection.OCR
+                        selection_reason = (
+                            "OCR was the only usable candidate"
+                            if not embedded
+                            else "OCR passed quality checks that embedded text failed"
+                        )
+                    elif embedded:
+                        blocks = embedded_blocks
+                        source = "embedded_text"
+                        kind = PageType.BROKEN_TEXT
+                        selection = PageSelection.REVIEW
+                        selection_reason = "OCR did not provide a clearly safer candidate"
+                        warnings.append(
+                            "Embedded and OCR candidates require review; retained embedded text"
+                        )
+                    else:
+                        blocks = []
+                        source = "unavailable"
+                        kind = PageType.SCAN
+                        selection = PageSelection.UNAVAILABLE
+                        selection_reason = "OCR returned no usable text"
+                        warnings.append("OCR returned no usable text")
+                except (MissingDependency, OcrError) as exc:
+                    if progress:
+                        progress(
+                            f"OCR page {index + 1} failed — {exc}", index, len(doc)
+                        )
+                    if embedded:
+                        blocks = embedded_blocks
+                        warnings.append(
+                            f"OCR unavailable; retained low-quality embedded text: {exc}"
+                        )
+                        kind = PageType.BROKEN_TEXT
+                        selection = PageSelection.REVIEW
+                        selection_reason = (
+                            "OCR was unavailable for questionable embedded text"
+                        )
+                    else:
+                        warnings.append(str(exc))
+                        blocks = []
+                        source = "unavailable"
+                        kind = PageType.SCAN
+                        selection = PageSelection.UNAVAILABLE
+                        selection_reason = "No embedded text and OCR was unavailable"
+            elif quality.score < options.good_threshold:
+                kind = PageType.BROKEN_TEXT
+                selection = PageSelection.REVIEW
+                selection_reason = "Embedded text is below the good-quality threshold"
+                warnings.append("Embedded text is only moderately reliable")
+            elif image_heavy:
+                kind = PageType.HYBRID if embedded else PageType.IMAGE_HEAVY
+            blocks = _reading_order(blocks, page.rect.width)
+            _classify_structure(blocks, page.rect.height, options)
+            _merge_paragraph_lines(blocks)
+            if options.preserve_images and selection in {
+                PageSelection.EMBEDDED,
+                PageSelection.REVIEW,
+            }:
+                for image_index, info in enumerate(images):
+                    try:
+                        if not _is_safe_figure_image(page, info[0], image_area, page_area):
+                            continue
+                        extracted = doc.extract_image(info[0])
+                        if len(extracted["image"]) < 4096:
+                            continue
+                        target = _save_epub_image(
+                            doc,
+                            info[0],
+                            image_dir,
+                            f"page-{index + 1:04d}-{image_index + 1}",
+                        )
+                        result.images.append(target)
+                        blocks.append(
+                            Block(
+                                BlockType.IMAGE,
+                                image_path=target.name,
+                                source="embedded_image",
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - one corrupt image must not abort a book
+                        warnings.append(
+                            f"Could not preserve image {image_index + 1}: {exc}"
+                        )
+            page_result = PageResult(
+                    index + 1,
+                    kind,
+                    source,
+                    page.rect.width,
+                    page.rect.height,
+                    page.rotation,
+                    blocks,
+                    selected_quality,
+                    ocr_confidence,
+                    warnings,
+                    selection,
+                    selection_reason,
+                    candidate_scores,
+                    candidates,
+                    ocr_metrics,
+                )
+            result.pages.append(page_result)
+            if control is not None:
+                control.page_committed(page_result)
+        _remove_repeated_margins(result)
+        if progress:
+            progress("Analyzing pages", len(doc), len(doc))
+        return result
     finally:
-      doc.close()
+        doc.close()
