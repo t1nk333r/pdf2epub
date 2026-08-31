@@ -80,12 +80,15 @@ _JOB_TRANSITIONS = {
     },
     JobState.INTERRUPTED: {JobState.PROCESSING},
     JobState.COMPLETE: set(),
-    JobState.FAILED: set(),
+    # A failed job keeps its source and options, so it can be started over.
+    JobState.FAILED: {JobState.QUEUED},
 }
 ```
 
 `JobState.PAUSE_REQUESTED` has no edge to `JobState.BUILDING`, and
-`JobState.FAILED` has no outgoing edges at all.
+`JobState.FAILED` has exactly one outgoing edge, to `QUEUED`, added for the
+restart endpoint. It has no edge to `INTERRUPTED`, which is what Step 3 adds —
+add to the set, do not replace it, or restart breaks.
 
 ### The progress callback (`pdf2epub/web.py:277-282`)
 
