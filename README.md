@@ -66,6 +66,15 @@ usage and back up the entire data root while the service is stopped. Run exactly
 one application process and one Uvicorn worker against a data root; the local
 lease is not a distributed lock.
 
+`DELETE /api/jobs/{job_id}` removes one job's storage and requires its 32-hex
+id; a running job is refused. `DELETE /api/jobs` removes every job that is not
+currently running, along with its storage, in one request — it requires
+`?confirm=true` or it returns `400 confirmation_required` and deletes nothing.
+The application has **no authentication of any kind**. Anyone who can reach the
+port can call either route. `confirm=true` only prevents an accidental request
+(a stray click, a crawler, a mistyped path); it is not an access control. Do
+not expose this service beyond localhost without adding authentication.
+
 ## Run
 
 ```bash
