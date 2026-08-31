@@ -313,8 +313,10 @@ anchorable.
 ## Execution log — 2026-08-31
 
 Plans 07, 10 and 11 were executed by Sonnet subagents in isolated worktrees off
-`12a81d6` and reviewed against their own done criteria. Merging is the
-operator's decision; nothing was merged or pushed.
+`12a81d6`, reviewed against their own done criteria, and **merged into
+`session/text-structure-ui` on operator approval**. All three merged without
+conflict. Post-merge: 126 tests pass, ruff clean, EPUBCheck clean on a
+generated book. Nothing has been pushed; `main` is untouched at `5f56abb`.
 
 | Plan | Branch | Commits | Verdict | Suite |
 |---|---|---|---|---|
