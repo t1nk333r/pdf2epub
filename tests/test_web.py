@@ -193,8 +193,12 @@ def test_home_contains_settings_dialog(client):
     assert "new URLSearchParams(location.search)" in response.text
     assert "localStorage.getItem('pdf2epub-active-job')" in response.text
     assert "typeof detail==='object'&&detail?detail.message" in response.text
-    assert "dashboardAction(job,'pause')" in response.text
-    assert "dashboardAction(job,'resume')" in response.text
+    assert "act('إيقاف مؤقت','pause')" in response.text
+    assert "act('متابعة','resume')" in response.text
+    assert "act('إعادة تشغيل','restart')" in response.text
+    assert 'class="layout"' in response.text
+    assert 'class="col-side"' in response.text
+    assert 'id="retry"' in response.text
 
 
 def test_job_logs_are_structured_bounded_and_public(monkeypatch):
@@ -532,3 +536,157 @@ def test_startup_recovery_runs_through_lifespan(monkeypatch):
         pass
     assert calls == [True]
     assert web.app.router.on_startup == []
+
+
+def test_allow_partial_is_accepted_from_the_upload_form(client, tmp_path, monkeypatch):
+    source = tmp_path / "book.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(source)
+    document.close()
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(web, "JOB_ROOT", jobs_root)
+    monkeypatch.setattr(web, "provider_names", lambda: {"tesseract"})
+    monkeypatch.setattr(web, "_start_worker", lambda *args: None)
+
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("book.pdf", source.read_bytes(), "application/pdf")},
+        data={"ocr_provider": "tesseract", "allow_partial": "true"},
+    )
+
+    assert response.status_code == 202
+    store = CheckpointStore(jobs_root, response.json()["job_id"])
+    assert store.load_manifest().options["allow_partial"] is True
+
+
+def test_allow_partial_defaults_to_false(client, tmp_path, monkeypatch):
+    source = tmp_path / "book.pdf"
+    document = pymupdf.open()
+    document.new_page()
+    document.save(source)
+    document.close()
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(web, "JOB_ROOT", jobs_root)
+    monkeypatch.setattr(web, "provider_names", lambda: {"tesseract"})
+    monkeypatch.setattr(web, "_start_worker", lambda *args: None)
+
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("book.pdf", source.read_bytes(), "application/pdf")},
+        data={"ocr_provider": "tesseract"},
+    )
+
+    assert response.status_code == 202
+    store = CheckpointStore(jobs_root, response.json()["job_id"])
+    assert store.load_manifest().options["allow_partial"] is False
+
+
+def test_failed_job_restarts_from_the_first_page(client, tmp_path, monkeypatch):
+    job = _persistent_job(tmp_path, JobState.FAILED)
+    try:
+        started = []
+        monkeypatch.setattr(web, "_start_worker", lambda *args: started.append(args[0]))
+        job.manifest.safe_pages = 4
+        job.safe_pages = 4
+        job.error = "Content integrity failed"
+        job.outputs = {"report": "stale-report.json"}
+        job.store.checkpoint_path(1).write_text("{}", encoding="utf-8")
+
+        response = client.post(f"/api/jobs/{job.id}/restart")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "queued"
+        assert body["safe_pages"] == 0
+        assert body["error"] is None
+        assert started == [job]
+        assert not list(job.store.checkpoints.glob("page-*.json"))
+        assert job.manifest.safe_pages == 0
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_restart_is_rejected_for_a_job_that_did_not_fail(client, tmp_path):
+    job = _persistent_job(tmp_path, JobState.PAUSED)
+    try:
+        response = client.post(f"/api/jobs/{job.id}/restart")
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "cannot_restart"
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_restart_refuses_a_changed_source_file(client, tmp_path, monkeypatch):
+    job = _persistent_job(tmp_path, JobState.FAILED)
+    try:
+        monkeypatch.setattr(web, "_start_worker", lambda *args: None)
+        (job.store.root / "source.pdf").write_bytes(b"%PDF-1.7 different")
+
+        response = client.post(f"/api/jobs/{job.id}/restart")
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "source_mismatch"
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_delete_job_removes_its_storage(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    job = _persistent_job(tmp_path, JobState.COMPLETE)
+    root = job.store.root
+    try:
+        assert root.is_dir()
+        response = client.delete(f"/api/jobs/{job.id}")
+        assert response.status_code == 200
+        assert response.json()["deleted"] == [job.id]
+        assert not root.exists()
+        assert job.id not in web.jobs
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_a_running_job_cannot_be_deleted(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    job = _persistent_job(tmp_path, JobState.PROCESSING)
+    try:
+        response = client.delete(f"/api/jobs/{job.id}")
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "job_running"
+        assert job.store.root.is_dir()
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_clear_jobs_keeps_running_ones(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    monkeypatch.setattr(web, "jobs", {})
+    done = _persistent_job(tmp_path, JobState.COMPLETE)
+    running = web._job_from_manifest(done.store, done.manifest)
+    running.id = "e" * 32
+    running.state = JobState.PROCESSING
+    web.jobs[running.id] = running
+    try:
+        response = client.delete("/api/jobs")
+        assert response.status_code == 200
+        assert response.json()["deleted"] == [done.id]
+        assert running.id in web.jobs
+    finally:
+        web.jobs.pop(done.id, None)
+        web.jobs.pop(running.id, None)
+
+
+def test_home_supports_dark_mode(client):
+    body = client.get("/").text
+    assert "prefers-color-scheme:dark" in body
+    assert ":root[data-theme=dark]" in body
+    assert 'id="theme-toggle"' in body
+    assert "pdf2epub-theme" in body
+    # every colour must resolve through a token so one override flips the page
+    assert "--surface:" in body and "--bg:" in body
+
+
+def test_home_has_job_delete_controls(client):
+    body = client.get("/").text
+    assert 'id="clear-jobs"' in body
+    assert "'/api/jobs/'+job.id,{method:'DELETE'}" in body

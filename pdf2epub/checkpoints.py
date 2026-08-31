@@ -287,6 +287,13 @@ class CheckpointStore:
     def checkpoint_path(self, page: int) -> Path:
         return self.checkpoints / f"page-{page:06d}.json"
 
+    def discard_checkpoints(self) -> None:
+        """Drop every saved page so a job can start over from page one."""
+        if self.checkpoints.is_dir() and not self.checkpoints.is_symlink():
+            for path in sorted(self.checkpoints.glob("page-*.json")):
+                path.unlink(missing_ok=True)
+        self.initialize()
+
     def write_page(self, page: PageResult, manifest: JobManifest) -> None:
         for block in page.blocks:
             if block.image_path:

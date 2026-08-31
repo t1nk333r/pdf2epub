@@ -23,6 +23,14 @@ def main() -> None:
         default="tesseract",
     )
     parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=(
+            "Publish an EPUB even when pages need review. The quality report "
+            "lists every affected page; the output is diagnostic, not final."
+        ),
+    )
+    parser.add_argument(
         "--ollama-model",
         choices=OLLAMA_BOOK_MODELS,
         default=OLLAMA_QUALITY_MODEL,
@@ -34,6 +42,7 @@ def main() -> None:
         ocr_language=args.ocr_language,
         ocr_provider=args.ocr_provider,
         ollama_model=args.ollama_model if args.ocr_provider == "ollama" else None,
+        allow_partial=args.allow_partial,
     )
     outputs = convert(
         args.pdf,

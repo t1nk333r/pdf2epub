@@ -63,7 +63,8 @@ _JOB_TRANSITIONS = {
     },
     JobState.INTERRUPTED: {JobState.PROCESSING},
     JobState.COMPLETE: set(),
-    JobState.FAILED: set(),
+    # A failed job keeps its source and options, so it can be started over.
+    JobState.FAILED: {JobState.QUEUED},
 }
 
 

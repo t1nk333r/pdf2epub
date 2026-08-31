@@ -200,9 +200,16 @@ Implement the small `OcrProvider` protocol in `pdf2epub/ocr.py`, add a `Provider
 
 The quality report has a versioned `integrity` section and records page source
 selection plus embedded/OCR candidate evidence. Pages with no recoverable text
-or pages still needing judgment block normal publication. Programmatic callers
-may explicitly set `allow_partial=True` to create a diagnostic EPUB; that output
-remains marked for review and is never the web or CLI default.
+or pages still needing judgment block normal publication. Pass `--allow-partial`
+on the CLI, tick the matching box in the upload form, or set
+`allow_partial=True` programmatically to publish a diagnostic EPUB anyway; that
+output remains marked for review and is never the default.
+
+A page is held for review only when the scorer names an actual defect. A page
+that scores low purely because it is short — a running head, a contents row —
+carries no defect and publishes normally. When the embedded text layer does
+trip a defect check, OCR is asked for a second opinion, and a tie is resolved
+in favour of OCR rather than silently keeping the flagged text.
 
 Generated EPUBs are built under a temporary name, validated, and atomically
 published. Failed validation leaves a downloadable diagnostic report but no new
