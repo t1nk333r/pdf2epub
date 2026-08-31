@@ -286,6 +286,13 @@ def _update(job_id: str, stage: str, done: int, total: int) -> None:
     with lock:
         job = jobs[job_id]
         if stage == "Building EPUB":
+            if job.state == JobState.PAUSE_REQUESTED:
+                job.pause_event.clear()
+                _append_log(
+                    job,
+                    "Pause requested too late to take effect; the last page "
+                    "was already saved, so the EPUB build will finish",
+                )
             _transition_job(job, JobState.BUILDING)
             job.current_page = None
         changed = (job.stage, job.done, job.total) != (stage, done, total)
@@ -454,6 +461,23 @@ def _recover_jobs() -> None:
                 manifest.current_page = None
                 manifest.lease = None
                 manifest.blocked_reason = None
+                store.write_manifest(manifest)
+            elif (
+                manifest.state == JobState.FAILED
+                and manifest.page_count > 0
+                and manifest.safe_pages == manifest.page_count
+            ):
+                manifest.state = require_transition(
+                    manifest.state, JobState.INTERRUPTED
+                )
+                manifest.stage = "Publication interrupted"
+                manifest.current_page = None
+                manifest.lease = None
+                manifest.blocked_code = "publication_failed"
+                manifest.blocked_reason = (
+                    "اكتمل OCR، لكن تعذر بناء أو التحقق من EPUB. "
+                    "أصلح EPUBCheck ثم أعد المتابعة."
+                )
                 store.write_manifest(manifest)
             jobs[child.name] = _job_from_manifest(store, manifest)
         except CheckpointError:
