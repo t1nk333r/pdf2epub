@@ -435,3 +435,33 @@ conversion, since it counts `﴿…﴾` markers in the extracted text directly. 
 that a fully scanned book has no embedded text layer and will undercount — for
 those, run the count against a completed conversion's `quality-report.json`
 instead, as the plan originally specified.
+
+
+## Landed on `main` — 2026-08-31
+
+`session/text-structure-ui` fast-forwarded into `main` at `641f186` (26 commits,
+23 files, +4,695/-61). Verified on `main` after the merge: **132 tests pass,
+ruff clean, EPUBCheck clean** on a generated book exercising anchors, a folded
+chapter and a footnote.
+
+`main` is now 32 commits ahead of `origin/main` (`b3d4ed3`). **Nothing has been
+pushed.**
+
+Branches `advisor/exec-06`, `-07`, `-08`, `-10`, `-11` and
+`session/text-structure-ui` are all fully merged into `main` and kept as the
+record of what each executor did; they can be deleted whenever that record is
+no longer wanted.
+
+### Open, with honest status
+
+- **Plan 09** — BLOCKED. Its Step 0 measurement has no corpus. Not rejected;
+  not built.
+- **Audit finding #6** — the OCR coverage gate (`MIN_LENGTH_RATIO` 0.6,
+  `MIN_WORD_OVERLAP` 0.5 in `pdf2epub/text.py`) is calibrated on a single book,
+  where the worst passing page sat at 0.66 overlap. `word_overlap` does not
+  strip diacritics, so an OCR read that adds tashkeel to an undiacritised text
+  layer could fall through the floor and have a correct read rejected. This
+  needs measurement against a second book before anyone writes a plan for it —
+  the same corpus that unblocks plan 09 would settle it.
+- **Audit findings #5, #7, #8, #9** — recorded in the audit table above, not
+  planned.
