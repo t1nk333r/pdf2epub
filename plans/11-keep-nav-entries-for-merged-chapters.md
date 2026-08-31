@@ -7,14 +7,11 @@
 > `plans/README.md` unless a reviewer says they maintain the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat 5f56abb..HEAD -- pdf2epub/epub.py tests/test_epub.py`
+> `git diff --stat a4a6e56..HEAD -- pdf2epub/epub.py tests/test_epub.py`
 >
-> **Important**: this plan was written against a working tree with **818
-> uncommitted insertions** on top of `5f56abb`. The excerpts in "Current state"
-> come from that working tree. Run `git status --porcelain` first:
-> - **dirty** → compare the excerpts against the working tree directly.
-> - **clean, and `grep -n "_merge_stub_chapters" pdf2epub/epub.py` finds
->   nothing** → this plan's subject does not exist. STOP and report.
+> If any in-scope file changed since `a4a6e56`, compare the "Current state"
+> excerpts against the live code before proceeding; a material mismatch is a
+> STOP condition.
 
 ## Status
 
@@ -23,7 +20,7 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: correctness
-- **Planned at**: commit `5f56abb` (+ uncommitted work), 2026-08-31
+- **Planned at**: commit `a4a6e56`, 2026-08-31
 
 ## Why this matters
 
