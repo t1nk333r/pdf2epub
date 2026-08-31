@@ -70,6 +70,40 @@ def test_uploaded_arabic_filename_is_preserved_safely():
     assert _safe_pdf_name("../../bad/name.pdf") == "name.pdf"
 
 
+def test_file_sha256_matches_chunked_upload_digest(tmp_path):
+    path = tmp_path / "large.bin"
+    path.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
+    assert web._file_sha256(path) == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_non_pdf_upload_is_rejected(client, tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(web, "JOB_ROOT", jobs_root)
+    monkeypatch.setattr(web, "provider_names", lambda: {"tesseract"})
+    monkeypatch.setattr(web, "_start_worker", lambda *args: None)
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("book.pdf", b"not a pdf at all", "application/pdf")},
+        data={"ocr_provider": "tesseract"},
+    )
+    assert response.status_code == 400
+    assert not jobs_root.exists() or list(jobs_root.iterdir()) == []
+
+
+def test_empty_upload_is_rejected(client, tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(web, "JOB_ROOT", jobs_root)
+    monkeypatch.setattr(web, "provider_names", lambda: {"tesseract"})
+    monkeypatch.setattr(web, "_start_worker", lambda *args: None)
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("book.pdf", b"", "application/pdf")},
+        data={"ocr_provider": "tesseract"},
+    )
+    assert response.status_code == 400
+    assert not jobs_root.exists() or list(jobs_root.iterdir()) == []
+
+
 def test_remote_ocr_requires_explicit_transfer_acknowledgement(client):
     response = client.post(
         "/api/jobs",
