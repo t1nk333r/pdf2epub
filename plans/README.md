@@ -26,7 +26,7 @@ for that.
 | 06 | Stop a late pause stranding a finished book in `failed` | P1 | M | — | DONE — `advisor/exec-06` (`4f571eb`), reviewed 2026-08-31; merged |
 | 07 | Stream upload validation and resume hashing | P2 | S | — | DONE — `advisor/exec-07` (`e3c2b0a`, `40fac35`), reviewed 2026-08-31; 120 pass |
 | 08 | Pin the progress-string contract the ETA depends on | P2 | S | — | DONE — `advisor/exec-08` (`a137dc9`), reviewed 2026-08-31; merged |
-| 09 | Verify Qur'anic quotations against a reference text | P3 | M | — | TODO — Step 0 is a go/no-go gate |
+| 09 | Verify Qur'anic quotations against a reference text | P3 | M | — | BLOCKED — Step 0 cannot be measured; no corpus available |
 | 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | DONE — `advisor/exec-10` (`d0ca2ab`), reviewed 2026-08-31; 119 pass |
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
 
@@ -399,3 +399,39 @@ restart. Any future reconcile should compare whole blocks, not a probe line.
   it vanish silently.
 - Plan 06: confirmed `tests/test_web.py` changes are pure additions (zero
   removed lines), so no existing pause or resume test was weakened to fit.
+
+
+## Plan 09 Step 0 — attempted 2026-08-31, BLOCKED
+
+Step 0 is the plan's own go/no-go gate: proceed only if a 100+ page corpus
+yields at least 20 Qur'anic quotations across at least 10 distinct pages.
+
+**The measurement could not be run — the corpus is gone.** The Arabic PDFs are
+no longer in `~/Downloads`, no `source.pdf` remains under
+`~/.local/share/pdf2epub/jobs/`, and a home-wide search for PDFs over 1 MB
+found none. The only sample left is a 20-page extract in this session's
+scratchpad.
+
+Measured on what exists:
+
+| Sample | Pages | Quotations | Pages with quotations |
+|---|---|---|---|
+| `first20.pdf` (front matter of one book) | 20 | 1 (page 5) | 1 |
+
+That is below threshold, but the sample is **underpowered and unrepresentative**,
+not conclusive. Twenty pages of cover, dedication, colophon and contents is the
+*least* likely part of an Islamic-studies book to quote the Qur'an; the body
+text is where such quotations cluster. Extrapolating from front matter would be
+the wrong inference in either direction.
+
+**Status: BLOCKED, not REJECTED.** The distinction matters — REJECTED would
+claim the measurement was taken and the feature judged not worth building. It
+was not taken. Nothing was implemented.
+
+**To unblock**: run the Step 0 counting script over a real 100+ page Arabic
+book, then either proceed or mark the plan REJECTED with the measured numbers.
+The script is inlined in the plan and needs only a PDF; it does not require a
+conversion, since it counts `﴿…﴾` markers in the extracted text directly. Note
+that a fully scanned book has no embedded text layer and will undercount — for
+those, run the count against a completed conversion's `quality-report.json`
+instead, as the plan originally specified.
