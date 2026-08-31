@@ -28,7 +28,7 @@ for that.
 | 08 | Pin the progress-string contract the ETA depends on | P2 | S | — | TODO |
 | 09 | Verify Qur'anic quotations against a reference text | P3 | M | — | TODO — Step 0 is a go/no-go gate |
 | 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | DONE — `advisor/exec-10` (`d0ca2ab`), reviewed 2026-08-31; 119 pass |
-| 11 | Keep navigation entries for merged chapters | P2 | S | — | TODO |
+| 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
 
 Status values for active plans: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, or
 `REJECTED`. Historical plans predate this index and are not execution tasks.
@@ -308,3 +308,54 @@ drift checks cannot anchor to a commit. Each carries an explicit instruction to
 run `git status --porcelain` first and to STOP if the tree is clean and the
 excerpts are absent. Committing the working tree would make all three
 anchorable.
+
+
+## Execution log — 2026-08-31
+
+Plans 07, 10 and 11 were executed by Sonnet subagents in isolated worktrees off
+`12a81d6` and reviewed against their own done criteria. Merging is the
+operator's decision; nothing was merged or pushed.
+
+| Plan | Branch | Commits | Verdict | Suite |
+|---|---|---|---|---|
+| 07 | `advisor/exec-07` | `e3c2b0a`, `40fac35` | APPROVED after 1 revision | 120 pass |
+| 10 | `advisor/exec-10` | `d0ca2ab` | APPROVED | 119 pass |
+| 11 | `advisor/exec-11` | `3165649` | APPROVED after 1 scope amendment | 121 pass |
+
+**Merge ordering**: 07 and 10 both modify `pdf2epub/web.py` and will conflict if
+merged blind. 11 is independent (`epub.py`, `test_epub.py`, one line of
+`test_pipeline_ocr.py`).
+
+### Defects found in these plans by their executors
+
+Worth weighing when reading plans 06, 08 and 09, none of which have been
+executed:
+
+- **Plan 07** claimed `tests/test_web.py` already covered the non-PDF upload
+  rejection, and on that basis said Step 1 needed no new test. No such test
+  existed. The executor followed the plan, flagged the discrepancy, and the gap
+  was closed on review — but as written the plan would have shipped a changed
+  validation path with nothing guarding it.
+- **Plan 11** scoped itself to `epub.py` and `tests/test_epub.py`, while Step 1
+  necessarily invalidated an assertion in `tests/test_pipeline_ocr.py:94`. The
+  executor stopped rather than editing an out-of-scope file or committing a red
+  suite. Scope was amended on review.
+- **Plan 11** named its Step 4 test `test_..._resolves_to_an_existing_id` while
+  its verify command was `pytest -k "anchor"`, which would have collected zero
+  tests and exited 5 while appearing to pass. The executor renamed the test.
+
+Common cause in all three: the plan asserted something about the repo that was
+not verified against the repo at writing time. Cheap fix for future plans — run
+the plan's own grep and verify commands before shipping it to an executor.
+
+### Verification the reviewer added beyond the executors' reports
+
+- Plan 07: independently removed `shutil.rmtree(store.root)` and confirmed both
+  new rejection tests fail, then restored — proving the tests pin cleanup rather
+  than only the 400.
+- Plan 11: ran EPUBCheck (which the executor could not, having no sample PDF) on
+  a generated book containing Arabic anchors such as `ch-2-قصيدة-قصيرة`.
+  **Passed with zero warnings**, confirming raw Arabic is valid both as an XML
+  `id` and inside an `href` fragment.
+- Plan 11: independently rebuilt the same document twice and confirmed the
+  chapter files are byte-identical, verifying anchor stability.
