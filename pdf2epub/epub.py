@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -146,6 +147,15 @@ def _footnote_target(identifier: str, page: int) -> str:
     return f"fn-{page}-{safe or 'note'}"
 
 
+def _chapter_anchor(text: str, page: int) -> str:
+    # Same shape as _footnote_target: page-scoped so an id stays stable and
+    # collision-resistant even when two headings share the same slugified
+    # text. This lets a nav entry for a merged chapter point at the heading
+    # inside its combined file.
+    safe = re.sub(r"[^\w.-]+", "-", text.strip(), flags=re.UNICODE).strip("-")
+    return f"ch-{page}-{safe or 'chapter'}"
+
+
 def _inline_html(text: str, fix_bidi: bool, page: int = 1) -> str:
     pieces: list[str] = []
     end = 0
@@ -169,18 +179,49 @@ def _inline_html(text: str, fix_bidi: bool, page: int = 1) -> str:
 MIN_CHAPTER_TEXT = 240
 
 
-def _merge_stub_chapters(chapters: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    merged: list[tuple[str, str]] = []
-    for title, body in chapters:
-        visible = len(re.sub(r"<[^>]+>", "", body).strip())
+@dataclass
+class _Chapter:
+    title: str
+    body: str
+    # The id on this chapter's own <h1>, or None when the chapter has no
+    # heading of its own (the front-matter text collected before the first
+    # level-1 heading).
+    anchor: str | None
+    # (title, anchor) pairs for chapters folded into this one, so their nav
+    # entries can still point somewhere inside the combined file.
+    carried: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _merge_stub_chapters(chapters: list[_Chapter]) -> list[_Chapter]:
+    merged: list[_Chapter] = []
+    for chapter in chapters:
+        visible = len(re.sub(r"<[^>]+>", "", chapter.body).strip())
         if merged and visible < MIN_CHAPTER_TEXT:
-            previous_title, previous_body = merged[-1]
-            merged[-1] = (previous_title, previous_body + body)
+            survivor = merged[-1]
+            carried = list(survivor.carried)
+            # A folded chapter with the same title as its survivor (a cover
+            # and a half-title carrying the same words) would otherwise
+            # duplicate the survivor's own nav entry.
+            if chapter.anchor is not None and (
+                chapter.title.strip() != survivor.title.strip()
+            ):
+                carried.append((chapter.title, chapter.anchor))
+            merged[-1] = _Chapter(
+                survivor.title, survivor.body + chapter.body, survivor.anchor, carried
+            )
         else:
-            merged.append((title, body))
+            merged.append(
+                _Chapter(chapter.title, chapter.body, chapter.anchor, list(chapter.carried))
+            )
     # A cover and a half-title carry the same words; keep one file, not two.
-    if len(merged) > 1 and merged[0][0].strip() == merged[1][0].strip():
-        merged[0] = (merged[0][0], merged[0][1] + merged[1][1])
+    if len(merged) > 1 and merged[0].title.strip() == merged[1].title.strip():
+        first, second = merged[0], merged[1]
+        merged[0] = _Chapter(
+            first.title,
+            first.body + second.body,
+            first.anchor,
+            first.carried + second.carried,
+        )
         del merged[1]
     return merged
 
@@ -191,6 +232,9 @@ def _block_html(block, fix_bidi: bool = True, page: int = 1) -> str:
     content = _inline_html(block.text, fix_bidi, page).replace("\n", "<br/>")
     if block.type == BlockType.HEADING:
         level = 2 if block.heading_level == 2 else 1
+        if level == 1:
+            anchor = html.escape(_chapter_anchor(block.text, page), quote=True)
+            return f'<h1 id="{anchor}">{content}</h1>'
         return f"<h{level}>{content}</h{level}>"
     if block.type == BlockType.FOOTNOTE:
         identifier = block.footnote_id or "note"
@@ -226,20 +270,28 @@ def build_epub(
             encoding="utf-8",
         )
         (epub / "css" / "book.css").write_text(CSS, encoding="utf-8")
-        chapters: list[tuple[str, str]] = []
+        chapters: list[_Chapter] = []
         current: list[str] = []
         current_title = document.title
+        current_anchor: str | None = None
         for page in document.pages:
             for block in page.blocks:
                 if block.type == BlockType.HEADING and block.heading_level == 1:
                     if current:
-                        chapters.append((current_title, "".join(current)))
+                        chapters.append(
+                            _Chapter(current_title, "".join(current), current_anchor)
+                        )
                         current = []
                     current_title = block.text.strip()[:160]
+                    current_anchor = _chapter_anchor(block.text, page.page)
                 current.append(_block_html(block, document.fix_bidi, page.page))
         if current or not chapters:
             chapters.append(
-                (current_title, "".join(current) or "<p>لا يوجد نص قابل للاستخراج.</p>")
+                _Chapter(
+                    current_title,
+                    "".join(current) or "<p>لا يوجد نص قابل للاستخراج.</p>",
+                    current_anchor,
+                )
             )
         chapters = _merge_stub_chapters(chapters)
         manifest: list[str] = [
@@ -248,16 +300,23 @@ def build_epub(
         ]
         spine: list[str] = []
         nav_items: list[str] = []
-        for i, (title, body) in enumerate(chapters, 1):
+        for i, chapter in enumerate(chapters, 1):
             name = f"chapter-{i:03d}.xhtml"
-            (epub / "chapters" / name).write_text(_xhtml(title, body), encoding="utf-8")
+            (epub / "chapters" / name).write_text(
+                _xhtml(chapter.title, chapter.body), encoding="utf-8"
+            )
             manifest.append(
                 f'<item id="c{i}" href="chapters/{name}" media-type="application/xhtml+xml"/>'
             )
             spine.append(f'<itemref idref="c{i}"/>')
             nav_items.append(
-                f'<li><a href="chapters/{name}">{html.escape(title)}</a></li>'
+                f'<li><a href="chapters/{name}">{html.escape(chapter.title)}</a></li>'
             )
+            for carried_title, carried_anchor in chapter.carried:
+                nav_items.append(
+                    f'<li><a href="chapters/{name}#{html.escape(carried_anchor)}">'
+                    f"{html.escape(carried_title)}</a></li>"
+                )
         for i, image_path in enumerate(document.images, 1):
             shutil.copy2(image_path, epub / "images" / image_path.name)
             media = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"

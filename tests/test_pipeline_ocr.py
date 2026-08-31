@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import zipfile
 from dataclasses import asdict
 
@@ -91,7 +92,7 @@ def test_custom_provider_runs_through_complete_pipeline(tmp_path):
     with zipfile.ZipFile(outputs["epub"]) as epub:
         chapter = epub.read("EPUB/chapters/chapter-001.xhtml").decode()
         assert "هذا نص من محرك خارجي" in chapter
-        assert "<h1>الفصل الأول</h1>" in chapter
+        assert re.search(r"<h1[^>]*>الفصل الأول</h1>", chapter)
         assert 'epub:type="noteref" href="#fn-1-1"' in chapter
         assert 'epub:type="footnote" class="footnote" id="fn-1-1"' in chapter
 
