@@ -16,8 +16,16 @@ LTR_RE = re.compile(
     r"\b\d+(?:[.:/-]\d+)+\b)"
 )
 INVISIBLE_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
-HAMZA_FORMS = frozenset("ءؤئأإآ")
-NORMAL_PUNCTUATION = frozenset("،؛؟.!,:()[]{}\"'«»…ـ-–—/\\+%٪=*_#@&؛؟")
+# A lam-alef ligature that the PDF font maps back in visual order arrives with
+# the lam and the alef transposed: "الأول" becomes "األول", "الانتخاب" becomes
+# "االنتخاب", and "الله" becomes "اهلل". None of these sequences occur in
+# correctly extracted Arabic.
+REVERSED_LIGATURE_RE = re.compile(r"ا[اأإآ]ل|اهلل")
+# Only the rare medial/final hamza carriers signal mis-mapped glyphs. The
+# alef-based forms (أ إ آ) are ordinary high-frequency letters and flagging
+# them made every short line of valid Arabic look corrupt.
+RARE_HAMZA_FORMS = frozenset("ءؤئ")
+NORMAL_PUNCTUATION = frozenset("،؛؟?.!,:()[]{}\"'«»…ـ-–—−/\\+%٪=*_#@&·•﴿﴾")
 SEVERE_TEXT_REASONS = frozenset(
     {
         "replacement characters",
@@ -25,8 +33,43 @@ SEVERE_TEXT_REASONS = frozenset(
         "probable visual-order/reversed Arabic",
         "improbable Arabic glyph density",
         "unexpected symbol noise",
+        "reversed lam-alef ligatures",
     }
 )
+# Reasons that mean the embedded text layer is untrustworthy enough to be worth
+# a second opinion from OCR. Word-splitting is the classic symptom of a broken
+# PDF font mapping, so it triggers a comparison even though it is not severe.
+BROKEN_EXTRACTION_REASONS = SEVERE_TEXT_REASONS | {"excessive one-character tokens"}
+# Below this many characters a page carries too little text for the
+# comparison to mean anything, so OCR is trusted on its own.
+MIN_COMPARABLE_TEXT = 200
+MIN_LENGTH_RATIO = 0.6
+MIN_WORD_OVERLAP = 0.5
+
+
+def word_overlap(left: str, right: str) -> float:
+    """Share of the left text's words that also appear in the right text."""
+    left_words = {w for w in WORD_RE.findall(normalize_arabic(left)) if len(w) > 1}
+    if not left_words:
+        return 1.0
+    right_words = {w for w in WORD_RE.findall(normalize_arabic(right)) if len(w) > 1}
+    return len(left_words & right_words) / len(left_words)
+
+
+def ocr_covers_embedded(embedded: str, ocr: str) -> bool:
+    """Is the OCR read a plausible transcription of the same page?
+
+    A vision model can drop half a page or invent fluent text, and neither
+    shows up in a quality score: invented Arabic scores well. The embedded
+    layer, even with broken glyph mapping, still preserves the words. So OCR
+    is only allowed to replace substantial embedded text when it keeps roughly
+    the same length and most of the same words.
+    """
+    if len(embedded.strip()) < MIN_COMPARABLE_TEXT:
+        return True
+    if len(ocr.strip()) < len(embedded.strip()) * MIN_LENGTH_RATIO:
+        return False
+    return word_overlap(embedded, ocr) >= MIN_WORD_OVERLAP
 
 
 def evaluate_text(text: str) -> TextQuality:
@@ -38,7 +81,7 @@ def evaluate_text(text: str) -> TextQuality:
     words = WORD_RE.findall(text)
     singles = sum(len(word) == 1 for word in words)
     arabic_chars = [c for c in visible if ARABIC_RE.match(c)]
-    hamza_ratio = sum(c in HAMZA_FORMS for c in arabic_chars) / max(
+    hamza_ratio = sum(c in RARE_HAMZA_FORMS for c in arabic_chars) / max(
         len(arabic_chars), 1
     )
     unexpected_symbols = sum(
@@ -47,6 +90,7 @@ def evaluate_text(text: str) -> TextQuality:
     )
     unexpected_symbol_ratio = unexpected_symbols / len(visible)
     spaced_arabic = bool(re.search(r"(?:[\u0600-\u06ff]\s){4,}[\u0600-\u06ff]", text))
+    reversed_ligatures = len(REVERSED_LIGATURE_RE.findall(text))
     probable_visual_order = any(
         HEADING_RE.match(line[::-1].strip())
         for line in text.splitlines()
@@ -67,6 +111,8 @@ def evaluate_text(text: str) -> TextQuality:
         score -= 0.25
     if spaced_arabic:
         score -= 0.35
+    if reversed_ligatures:
+        score -= 0.35
     if probable_visual_order:
         score -= 0.4
     improbable_glyph_density = len(arabic_chars) >= 8 and hamza_ratio > 0.16
@@ -81,6 +127,8 @@ def evaluate_text(text: str) -> TextQuality:
         reasons.append("excessive one-character tokens")
     if spaced_arabic:
         reasons.append("disconnected Arabic letters")
+    if reversed_ligatures:
+        reasons.append("reversed lam-alef ligatures")
     if probable_visual_order:
         reasons.append("probable visual-order/reversed Arabic")
     if improbable_glyph_density:
