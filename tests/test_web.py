@@ -381,6 +381,85 @@ def test_resume_unavailable_provider_returns_stable_422(client, tmp_path, monkey
         web.jobs.pop(job.id, None)
 
 
+def test_ocr_progress_message_feeds_page_durations(tmp_path):
+    # Pins the contract in pdf2epub/analyzer.py: the OCR progress message
+    # carries one `total_duration=<seconds>s` group per attempt, and
+    # web._update sums the groups into a single page_durations entry.
+    job = _persistent_job(tmp_path, JobState.PROCESSING)
+    try:
+        single_attempt = (
+            "OCR page 3 completed — model=qwen3-vl:32b-instruct-gpu "
+            "prompt_eval_count=1200 eval_count=800 total_duration=12.5s "
+            "retries=0; fallback_used=no"
+        )
+        web._update(job.id, single_attempt, 2, 10)
+        assert job.manifest.page_durations == [12.5]
+
+        two_attempts = (
+            "OCR page 4 completed — "
+            "model=qwen3-vl:8b-instruct-gpu prompt_eval_count=900 "
+            "eval_count=400 total_duration=5.0s retries=1; "
+            "model=qwen3-vl:32b-instruct-gpu prompt_eval_count=1200 "
+            "eval_count=800 total_duration=6.0s retries=0; "
+            "fallback_used=yes; reason=confidence_low"
+        )
+        web._update(job.id, two_attempts, 3, 10)
+        assert job.manifest.page_durations == [12.5, 11.0]
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_analyzer_progress_message_is_parsed_by_the_web_layer(tmp_path):
+    # End-to-end contract test: a real conversion's progress messages,
+    # produced by pdf2epub/analyzer.py, must still be parseable by
+    # web._update. If either side of the contract is reworded, this test
+    # fails instead of the ETA silently disappearing.
+    from test_pipeline_ocr import FakeOcrProvider
+
+    source = tmp_path / "scan.pdf"
+    document = pymupdf.open()
+    for _ in range(3):
+        document.new_page()
+    document.save(source)
+    document.close()
+    options = ConversionOptions(
+        mode="force_ocr", preserve_images=False, require_epubcheck=False
+    )
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    job_id = "e" * 32
+    store = CheckpointStore(tmp_path / "jobs", job_id)
+    store.initialize()
+    manifest = JobManifest(
+        id=job_id,
+        filename="scan.pdf",
+        source_sha256=source_hash,
+        source_size=source.stat().st_size,
+        page_count=3,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract=processing_contract(source_hash, 3, options, "test_provider", None),
+        provider_id="test_provider",
+    )
+    store.write_manifest(manifest)
+    job = web._job_from_manifest(store, manifest)
+    web.jobs[job_id] = job
+    try:
+        provider = FakeOcrProvider()
+        outputs = pipeline.convert(
+            source,
+            store.output,
+            options,
+            lambda s, d, t: web._update(job_id, s, d, t),
+            ocr_provider=provider,
+            control=ConversionControl(store, manifest),
+        )
+        assert outputs["epub"].is_file()
+        assert job.manifest.page_durations == [3.5, 3.5, 3.5]
+    finally:
+        web.jobs.pop(job_id, None)
+
+
 def test_create_job_persists_source_contract_before_worker(
     client, tmp_path, monkeypatch
 ):
