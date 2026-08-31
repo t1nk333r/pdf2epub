@@ -615,6 +615,8 @@ def analyze_pdf(
                             if ocr_metrics.get("fallback_reason")
                             else "; fallback_used=no"
                         )
+                        # pdf2epub/web.py parses `total_duration=<seconds>s` out of
+                        # this message, one match per attempt, to build the ETA.
                         progress(
                             f"OCR page {index + 1} completed — {attempt_log}{fallback}",
                             index,

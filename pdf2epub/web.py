@@ -292,6 +292,8 @@ def _update(job_id: str, stage: str, done: int, total: int) -> None:
         job.stage, job.done, job.total = stage, done, total
         if changed:
             _append_log(job, f"{stage} — {done}/{total} ({job.percent}%)")
+        # pdf2epub/analyzer.py is the producer of this message; it formats one
+        # `total_duration=<seconds>s` group per OCR attempt on the page.
         if stage.startswith("OCR page") and " completed " in stage and job.manifest:
             durations = [
                 float(value)
