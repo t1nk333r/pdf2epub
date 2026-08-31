@@ -23,9 +23,9 @@ for that.
 | 03 | OCR provider registry and runtime reliability | — | — | — | HISTORICAL |
 | 04 | Python 3.14, web-test hang, and runtime warnings | P1 | M | — | MERGED into `main` 2026-08-28 (`461a2b2`, `1e80bcb`); all gates verified first |
 | 05 | Durable pause, resume, and power-loss recovery | P1 | L | 04 | MERGED into `main` 2026-08-28 (`c4ce02b`, `45699f0`, `4053f41`, `5f56abb`); all gates verified first |
-| 06 | Stop a late pause stranding a finished book in `failed` | P1 | M | — | TODO |
+| 06 | Stop a late pause stranding a finished book in `failed` | P1 | M | — | DONE — `advisor/exec-06` (`4f571eb`), reviewed 2026-08-31; merged |
 | 07 | Stream upload validation and resume hashing | P2 | S | — | DONE — `advisor/exec-07` (`e3c2b0a`, `40fac35`), reviewed 2026-08-31; 120 pass |
-| 08 | Pin the progress-string contract the ETA depends on | P2 | S | — | TODO |
+| 08 | Pin the progress-string contract the ETA depends on | P2 | S | — | DONE — `advisor/exec-08` (`a137dc9`), reviewed 2026-08-31; merged |
 | 09 | Verify Qur'anic quotations against a reference text | P3 | M | — | TODO — Step 0 is a go/no-go gate |
 | 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | DONE — `advisor/exec-10` (`d0ca2ab`), reviewed 2026-08-31; 119 pass |
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
@@ -361,3 +361,41 @@ the plan's own grep and verify commands before shipping it to an executor.
   `id` and inside an `href` fragment.
 - Plan 11: independently rebuilt the same document twice and confirmed the
   chapter files are byte-identical, verifying anchor stability.
+
+
+## Execution round 2 — 2026-08-31
+
+Plans 06 and 08 executed and merged. Suite: **132 passing**, ruff clean,
+EPUBCheck clean. Plan 09 held back: its Step 0 is a measurement gate that needs
+a real 100+ page book, not a worktree.
+
+Before dispatching, all three remaining plans were reconciled against the merged
+tree. Every one was stale:
+
+- All three claimed a baseline of "at least 88 tests pass" (06, 08) or 121 (09)
+  against an actual 126. An executor could have deleted 38 tests and still
+  passed that criterion.
+- Plan 06 stated `failed` was terminal — untrue since restart landed. The
+  underlying defect was re-verified as still reproducing before the plan was
+  kept.
+- Plan 08's citations had drifted: producer `analyzer.py:540`→`:605`, consumer
+  `web.py:287`→`:295`, and its comment-style exemplar pointed at
+  `analyzer.py:81-82`, which is now unrelated code.
+
+**The reconcile pass itself was unsound.** It verified excerpts by checking only
+the longest line of each fenced block, so a stale `JobState.FAILED: set()`
+excerpt in plan 06 survived — the executor caught it during execution and
+correctly added to the set rather than replacing it, which would have broken
+restart. Any future reconcile should compare whole blocks, not a probe line.
+
+### Verification the reviewer added beyond the executors' reports
+
+- Plan 08: independently renamed the `total_duration=` token on the **merged**
+  tree and confirmed exactly one test fails, then reverted. The contract is
+  pinned post-merge, not just in-branch.
+- Plan 06: re-ran the original `ValueError` reproduction on the merged tree —
+  no exception, state advances to `building`, `pause_event` cleared, and an
+  explicit log line records that the pause arrived too late rather than letting
+  it vanish silently.
+- Plan 06: confirmed `tests/test_web.py` changes are pure additions (zero
+  removed lines), so no existing pause or resume test was weakened to fit.
