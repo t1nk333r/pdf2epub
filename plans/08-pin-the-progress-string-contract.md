@@ -7,7 +7,7 @@
 > `plans/README.md` unless a reviewer says they maintain the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat 5f56abb..HEAD -- pdf2epub/analyzer.py pdf2epub/web.py tests/test_web.py`
+> `git diff --stat eecb074..HEAD -- pdf2epub/analyzer.py pdf2epub/web.py tests/test_web.py`
 > If an in-scope file changed since this plan was written, compare the
 > "Current state" excerpts against the live code before proceeding. A material
 > mismatch is a STOP condition.
@@ -19,7 +19,7 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: tests
-- **Planned at**: commit `5f56abb`, 2026-08-28
+- **Planned at**: commit `5f56abb`, 2026-08-28; reconciled to `eecb074`, 2026-08-31
 
 ## Why this matters
 
@@ -36,7 +36,7 @@ the next person to touch that log line finds out immediately.
 
 ## Current state
 
-### The producer (`pdf2epub/analyzer.py:540-552`)
+### The producer (`pdf2epub/analyzer.py:605-617`)
 
 ```python
                         attempts = ocr_metrics.get("attempts") or [ocr_metrics]
@@ -60,7 +60,7 @@ the next person to touch that log line finds out immediately.
                         )
 ```
 
-### The consumer (`pdf2epub/web.py:287-294`)
+### The consumer (`pdf2epub/web.py:295-302`)
 
 ```python
         if stage.startswith("OCR page") and " completed " in stage and job.manifest:
@@ -172,14 +172,14 @@ Add `test_analyzer_progress_message_is_parsed_by_the_web_layer` to
 on a small generated PDF with the `FakeOcrProvider` from
 `tests/test_pipeline_ocr.py`, passing a `progress` callback that forwards into
 `web._update` for a job you set up first — mirroring how `_run` wires them at
-`pdf2epub/web.py:302-312`.
+`pdf2epub/web.py:310-320`.
 
 Assert that after the conversion the job's `manifest.page_durations` has one
 entry per OCR'd page. This is the test that actually fails if either side of the
 contract is reworded, which is the whole point of the plan.
 
 `FakeOcrProvider` already returns `duration_seconds=3.5`
-(`tests/test_pipeline_ocr.py:40` and the mirrored attempt metrics at line 47),
+(`tests/test_pipeline_ocr.py:41` and the mirrored attempt metrics at line 47),
 so the durations the web layer records should be multiples of that. Assert
 against it rather than against a hand-written number. Do not write a second
 fake provider.
@@ -190,12 +190,12 @@ fake provider.
 ### Step 3: Make the contract visible at both ends
 
 Add a one-line comment above the `progress(...)` call in
-`pdf2epub/analyzer.py:548-552` stating that `pdf2epub/web.py` parses
+`pdf2epub/analyzer.py:613-617` stating that `pdf2epub/web.py` parses
 `total_duration=<seconds>s` out of this message to build the ETA, and a matching
-one-line comment above the `re.findall` in `pdf2epub/web.py:288-291` naming
+one-line comment above the `re.findall` in `pdf2epub/web.py:296-299` naming
 `pdf2epub/analyzer.py` as the producer. Match the existing comment style in the
 package: full sentences ending in a period, wrapped at the same width as the
-code — see the two-line comment at `pdf2epub/analyzer.py:81-82` for the
+code — see the two-line comment at `pdf2epub/text.py:151-152` for the
 exemplar.
 
 Change no code in this step.
@@ -206,7 +206,7 @@ one or two added lines and zero deletions.
 ### Step 4: Full suite and lint
 
 **Verify**:
-- `.venv/bin/python -m pytest -q` → exit 0, 88 or more tests pass.
+- `.venv/bin/python -m pytest -q` → exit 0, 126 or more tests pass.
 - `.venv/bin/ruff check .` → exit 0, `All checks passed!`
 
 ## Test plan
@@ -217,7 +217,7 @@ one or two added lines and zero deletions.
 - `test_analyzer_progress_message_is_parsed_by_the_web_layer` in
   `tests/test_web.py` — the end-to-end contract test; model it on
   `test_pipeline_pause_publishes_nothing_and_resume_reuses_checkpoint` in
-  `tests/test_pipeline_ocr.py:143` for how to build a small PDF and drive
+  `tests/test_pipeline_ocr.py:144` for how to build a small PDF and drive
   `convert` with a fake provider.
 - Structural pattern to follow for job setup: `_persistent_job` in
   `tests/test_web.py`.
@@ -226,7 +226,7 @@ one or two added lines and zero deletions.
 
 ALL must hold:
 
-- [ ] `.venv/bin/python -m pytest -q` exits 0 with at least 88 tests passing.
+- [ ] `.venv/bin/python -m pytest -q` exits 0 with at least 126 tests passing.
 - [ ] `.venv/bin/ruff check .` exits 0 with `All checks passed!`.
 - [ ] Editing the `total_duration=` token in `pdf2epub/analyzer.py` to any other
       name makes at least one test fail. Verify this by hand: make the edit, run

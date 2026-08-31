@@ -10,13 +10,12 @@
 > "not worth building". That is a successful outcome, not a failure.
 >
 > **Drift check (run first)**:
-> `git diff --stat 5f56abb..HEAD -- pdf2epub/text.py pdf2epub/models.py pdf2epub/pipeline.py`
+> `git diff --stat eecb074..HEAD -- pdf2epub/text.py pdf2epub/models.py pdf2epub/pipeline.py`
 >
-> **Important**: this plan was written against a working tree with **14 modified
-> files not yet committed** at `5f56abb`. The excerpts in "Current state" come
-> from that working tree, not from the commit. If `git status` is clean and the
-> excerpts do not match, the uncommitted work was discarded — that is a STOP
-> condition. If `git status` is dirty, compare the excerpts directly.
+> If any in-scope file changed since `eecb074`, compare the "Current state"
+> excerpts against the live code before proceeding; a material mismatch is a
+> STOP condition. All excerpts below were re-verified against `eecb074` on
+> 2026-08-31.
 
 ## Status
 
@@ -25,7 +24,7 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: correctness
-- **Planned at**: commit `5f56abb` (+ uncommitted work), 2026-08-28
+- **Planned at**: reconciled to `eecb074`, 2026-08-31
 - **Source**: idea adapted from `The_Arabic_OCR` (see "Provenance and licensing")
 
 ## Why this matters
@@ -333,7 +332,7 @@ degrade to "no verification", never to a failed book.
 ### Step 5: Full suite and lint
 
 **Verify**:
-- `.venv/bin/python -m pytest -q` → exit 0, at least 121 tests pass.
+- `.venv/bin/python -m pytest -q` → exit 0, at least 126 tests pass.
 - `.venv/bin/ruff check .` → exit 0, `All checks passed!`
 
 ## Test plan
@@ -363,7 +362,7 @@ no class wrappers and no fixtures.
 ALL must hold:
 
 - [ ] Step 0 was run and its measured numbers are recorded in `plans/README.md`.
-- [ ] `.venv/bin/python -m pytest -q` exits 0 with at least 121 tests passing.
+- [ ] `.venv/bin/python -m pytest -q` exits 0 with at least 126 tests passing.
 - [ ] `.venv/bin/ruff check .` exits 0 with `All checks passed!`.
 - [ ] The reference text's source and licence are recorded in `pdf2epub/quran.py`.
 - [ ] `grep -rn "text = .*quran\|block.text =" pdf2epub/quran.py` returns no

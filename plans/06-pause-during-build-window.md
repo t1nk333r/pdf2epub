@@ -7,7 +7,7 @@
 > `plans/README.md` unless a reviewer says they maintain the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat 5f56abb..HEAD -- pdf2epub/models.py pdf2epub/web.py pdf2epub/pipeline.py tests/test_web.py tests/test_jobs.py`
+> `git diff --stat eecb074..HEAD -- pdf2epub/models.py pdf2epub/web.py pdf2epub/pipeline.py tests/test_web.py tests/test_jobs.py`
 > If an in-scope file changed since this plan was written, compare the
 > "Current state" excerpts against the live code before proceeding. A material
 > mismatch is a STOP condition.
@@ -19,7 +19,7 @@
 - **Risk**: MED
 - **Depends on**: none
 - **Category**: bug
-- **Planned at**: commit `5f56abb`, 2026-08-28
+- **Planned at**: commit `5f56abb`, 2026-08-28; reconciled to `eecb074`, 2026-08-31
 
 ## Why this matters
 
@@ -27,11 +27,16 @@ This application exists to protect hours of GPU OCR against interruption. A
 pause request that arrives after the last page has been committed — but before
 the EPUB build stage begins — currently drives an illegal
 `pause_requested → building` state transition. `require_transition` raises
-`ValueError`, the worker's catch-all handler marks the job `failed`, and
-`failed` is a terminal state that `POST /api/jobs/{id}/resume` rejects. The
-result is the exact outcome the durability work was built to prevent: a book
-whose every page is durably checkpointed becomes unreachable from the UI, and
-the operator's only recovery is to start the whole conversion again.
+`ValueError` and the worker's catch-all handler marks the job `failed`.
+`POST /api/jobs/{id}/resume` rejects a failed job, so the checkpoints cannot be
+reused. `POST /api/jobs/{id}/restart` will accept it, but a restart deliberately
+calls `discard_checkpoints()` and reruns from page one. Either way the outcome
+is the one the durability work exists to prevent: a book whose every page is
+durably checkpointed can only be recovered by redoing the whole conversion.
+
+(Verified still reproducing on `eecb074`: driving a `pause_requested` job
+through `web._update(job_id, "Building EPUB", 0, 1)` raises
+`ValueError: Illegal job state transition: pause_requested -> building`.)
 
 The window is not a hairline race. On a job resumed after a publication
 failure, every page checkpoint already exists, so the analyzer's page loop
@@ -221,7 +226,7 @@ Note: the console scripts in `.venv/bin/` carry a stale shebang and fail with
 
 Add to `tests/test_web.py`, modelled on the existing
 `test_pause_is_idempotent_and_sets_page_boundary_event`
-(`tests/test_web.py:269`) for structure and on `_persistent_job` for setup:
+(`tests/test_web.py:307`) for structure and on `_persistent_job` for setup:
 
 1. `test_pause_after_last_page_does_not_fail_the_job` — build a job in
    `JobState.PROCESSING`, set its state to `JobState.PAUSE_REQUESTED` to model
@@ -319,7 +324,7 @@ New tests, all in `tests/test_web.py`, structured after
 
 ALL must hold:
 
-- [ ] `.venv/bin/python -m pytest -q` exits 0 with at least 88 tests passing.
+- [ ] `.venv/bin/python -m pytest -q` exits 0 with at least 126 tests passing.
 - [ ] `.venv/bin/ruff check .` exits 0 with `All checks passed!`.
 - [ ] Driving `_update(job_id, "Building EPUB", 0, 1)` on a job in
       `pause_requested` no longer raises.
