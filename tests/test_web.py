@@ -667,13 +667,47 @@ def test_clear_jobs_keeps_running_ones(client, tmp_path, monkeypatch):
     running.state = JobState.PROCESSING
     web.jobs[running.id] = running
     try:
-        response = client.delete("/api/jobs")
+        response = client.delete("/api/jobs?confirm=true")
         assert response.status_code == 200
         assert response.json()["deleted"] == [done.id]
         assert running.id in web.jobs
     finally:
         web.jobs.pop(done.id, None)
         web.jobs.pop(running.id, None)
+
+
+def test_clear_jobs_requires_confirmation(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    monkeypatch.setattr(web, "jobs", {})
+    job = _persistent_job(tmp_path, JobState.COMPLETE)
+    root = job.store.root
+    try:
+        response = client.delete("/api/jobs")
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "confirmation_required"
+        assert root.is_dir()
+        assert job.id in web.jobs
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_clear_jobs_skips_storage_outside_the_job_root(client, tmp_path, monkeypatch):
+    job_root = tmp_path / "job_root"
+    job_root.mkdir()
+    outside_root = tmp_path / "elsewhere"
+    outside_root.mkdir()
+    monkeypatch.setattr(web, "JOB_ROOT", job_root)
+    monkeypatch.setattr(web, "jobs", {})
+    job = _persistent_job(outside_root, JobState.COMPLETE)
+    root = job.store.root
+    try:
+        response = client.delete("/api/jobs?confirm=true")
+        assert response.status_code == 200
+        assert response.json()["skipped"] == [job.id]
+        assert root.is_dir()
+        assert job.id in web.jobs
+    finally:
+        web.jobs.pop(job.id, None)
 
 
 def test_home_supports_dark_mode(client):
