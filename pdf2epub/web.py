@@ -274,6 +274,14 @@ def _safe_pdf_name(filename: str | None) -> str:
     return f"{safe_stem[:120] or 'book'}.pdf"
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _update(job_id: str, stage: str, done: int, total: int) -> None:
     with lock:
         job = jobs[job_id]
@@ -571,7 +579,9 @@ def create_job(
             digest.update(chunk)
         target.flush()
         os.fsync(target.fileno())
-    if pdf.read_bytes()[:5] != b"%PDF-":
+    with pdf.open("rb") as handle:
+        header = handle.read(5)
+    if header != b"%PDF-":
         shutil.rmtree(store.root)
         raise HTTPException(400, "The uploaded file is not a PDF")
     options = ConversionOptions(
@@ -714,8 +724,7 @@ def resume_job(job_id: str) -> dict:
         if (
             not source.is_file()
             or source.is_symlink()
-            or hashlib.sha256(source.read_bytes()).hexdigest()
-            != job.manifest.source_sha256
+            or _file_sha256(source) != job.manifest.source_sha256
         ):
             job.blocked_code = "source_mismatch"
             job.blocked_reason = (
@@ -841,8 +850,7 @@ def restart_job(job_id: str) -> dict:
         if (
             not source.is_file()
             or source.is_symlink()
-            or hashlib.sha256(source.read_bytes()).hexdigest()
-            != job.manifest.source_sha256
+            or _file_sha256(source) != job.manifest.source_sha256
         ):
             job.blocked_code = "source_mismatch"
             job.blocked_reason = (
