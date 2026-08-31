@@ -162,7 +162,22 @@ Note: the console scripts in `.venv/bin/` carry a stale shebang and fail with
 
 - `pdf2epub/epub.py`
 - `tests/test_epub.py`
+- `tests/test_pipeline_ocr.py` — **one assertion only**, see the note below
 - `plans/README.md` (status row only)
+
+**Scope amendment, 2026-08-31**: adding an `id` to every level-1 heading in
+Step 1 changes the rendered HTML, and `tests/test_pipeline_ocr.py:94` asserts on
+the exact rendered string `"<h1>الفصل الأول</h1>"`. That assertion cannot
+survive a correct implementation. Update **only** that one line, and keep the
+check as strong as it was — match the heading with its attributes tolerated
+rather than dropping the tag from the assertion:
+
+```python
+assert re.search(r"<h1[^>]*>الفصل الأول</h1>", chapter)
+```
+
+Weakening it to a bare text search would stop proving the text is a heading at
+all. Change nothing else in that file.
 
 **Out of scope**:
 
@@ -296,6 +311,8 @@ Stop and report back instead of improvising if:
 - EPUBCheck reports a validation error after your change that it did not report
   before. Dangling fragment links are exactly the failure mode this plan risks
   introducing, so do not work around it — report it.
+- A test outside the in-scope list fails for a reason other than the single
+  `tests/test_pipeline_ocr.py:94` assertion covered by the scope amendment.
 - You find that fixing the navigation requires changing which chapters merge.
   That is out of scope; report the conflict.
 - The stable-id requirement cannot be met without a global counter. That
