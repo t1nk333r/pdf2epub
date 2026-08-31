@@ -92,8 +92,8 @@ def test_custom_provider_runs_through_complete_pipeline(tmp_path):
         chapter = epub.read("EPUB/chapters/chapter-001.xhtml").decode()
         assert "هذا نص من محرك خارجي" in chapter
         assert "<h1>الفصل الأول</h1>" in chapter
-        assert 'epub:type="noteref" href="#fn-1"' in chapter
-        assert 'epub:type="footnote" class="footnote" id="fn-1"' in chapter
+        assert 'epub:type="noteref" href="#fn-1-1"' in chapter
+        assert 'epub:type="footnote" class="footnote" id="fn-1-1"' in chapter
 
 
 def test_missing_scan_ocr_blocks_normal_epub_publication(tmp_path):
@@ -350,3 +350,115 @@ def test_resume_quarantines_corrupt_next_page_without_repeating_ocr(tmp_path):
     assert provider.calls == 3
     assert manifest.safe_pages == 3
     assert len(list(store.checkpoints.glob(".corrupt-page-000002-*.json"))) == 1
+
+
+def _text_pdf(path, lines: list[str]) -> None:
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_text((72, 72), lines, fontsize=9)
+    pdf.save(path)
+    pdf.close()
+
+
+def test_short_clean_page_is_not_held_back_for_review(tmp_path):
+    # A heading row scores low on length alone and carries no detected defect.
+    # A short page is not a broken page, so it must not block publication.
+    source = tmp_path / "toc.pdf"
+    _text_pdf(source, ["Contents listing of the chapters"])
+    output = tmp_path / "output"
+
+    outputs = convert(
+        source,
+        output,
+        ConversionOptions(preserve_images=False, require_epubcheck=False),
+        ocr_provider=FailingOcrProvider(),
+    )
+
+    report = json.loads(outputs["report"].read_text())
+    detail = report["page_details"][0]
+    assert detail["quality"]["reasons"] == []
+    assert detail["quality"]["score"] < 0.68
+    assert detail["selection"] == "embedded"
+    assert report["integrity"]["status"] == "passed"
+    assert report["integrity"]["review_pages"] == []
+
+
+_SPLIT_LETTERS = " ".join(("abcdefghijklmnopqrstuvwxyz" * 3)[:70])
+_OTHER_LETTERS = " ".join(("abcdefghijklmnopqrstuvwxyz" * 3)[:70][::-1])
+
+
+class TiedOcrProvider:
+    """Returns text that scores exactly as well as the embedded layer."""
+
+    name = "tied"
+
+    def recognize(self, image_png: bytes, language: str) -> OcrResult:
+        return OcrResult(_OTHER_LETTERS, 0.9, self.name, model="tied-model")
+
+
+def test_defect_flagged_embedded_text_loses_a_tie_to_ocr(tmp_path):
+    # Text split into single characters is the classic broken font mapping.
+    # A tie must not silently retain the candidate already flagged as defective.
+    source = tmp_path / "broken.pdf"
+    _text_pdf(source, [_SPLIT_LETTERS[:70], _SPLIT_LETTERS[70:]])
+    output = tmp_path / "output"
+
+    outputs = convert(
+        source,
+        output,
+        ConversionOptions(preserve_images=False, require_epubcheck=False),
+        ocr_provider=TiedOcrProvider(),
+    )
+
+    detail = json.loads(outputs["report"].read_text())["page_details"][0]
+    assert "excessive one-character tokens" in detail["candidates"]["embedded_text"][
+        "reasons"
+    ]
+    assert detail["candidate_scores"]["ocr:tied"] == pytest.approx(
+        detail["candidate_scores"]["embedded_text"]
+    )
+    assert detail["source"] == "ocr:tied"
+    assert detail["selection"] == "ocr"
+
+
+class ModelNamedOcrProvider(FakeOcrProvider):
+    name = "named"
+    model = "qwen3-vl:32b-instruct-gpu"
+
+
+def test_ocr_progress_names_the_model(tmp_path):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+    stages = []
+    convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(
+            mode="force_ocr", preserve_images=False, require_epubcheck=False
+        ),
+        lambda stage, done, total: stages.append(stage),
+        ocr_provider=ModelNamedOcrProvider(),
+    )
+    assert "OCR page 1 via named — qwen3-vl:32b-instruct-gpu" in stages
+
+
+def test_a_provider_without_a_model_keeps_the_plain_message(tmp_path):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+    stages = []
+    convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(
+            mode="force_ocr", preserve_images=False, require_epubcheck=False
+        ),
+        lambda stage, done, total: stages.append(stage),
+        ocr_provider=FakeOcrProvider(),
+    )
+    assert "OCR page 1 via test_provider" in stages

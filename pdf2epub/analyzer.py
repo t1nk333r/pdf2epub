@@ -18,7 +18,14 @@ from .models import (
     PageType,
 )
 from .ocr import OcrError, OcrProvider, create_ocr_provider
-from .text import HEADING_RE, SEVERE_TEXT_REASONS, evaluate_text, normalize_arabic
+from .text import (
+    BROKEN_EXTRACTION_REASONS,
+    HEADING_RE,
+    SEVERE_TEXT_REASONS,
+    evaluate_text,
+    normalize_arabic,
+    ocr_covers_embedded,
+)
 
 Progress = Callable[[str, int, int], None]
 EPUB_IMAGE_EXTENSIONS = {"gif", "jpeg", "jpg", "png", "svg"}
@@ -130,6 +137,39 @@ def _reading_order(blocks: list[Block], width: float) -> list[Block]:
     return sorted(blocks, key=lambda b: (b.bbox[1], -b.bbox[0]))
 
 
+# A contents entry is a title followed by the page it points at, usually padded
+# with dot leaders. OCR often drops the leaders, so they cannot be required.
+CONTENTS_ENTRY_RE = re.compile(r"(?:\.{3,}\s*)?[\u0660-\u06690-9]{1,4}\s*$")
+DOT_LEADER_RE = re.compile(r"\.{4,}")
+
+
+def _contents_entries(lines: list[str]) -> int:
+    return sum(
+        bool(CONTENTS_ENTRY_RE.search(line)) and len(line.split()) >= 2
+        for line in lines
+    )
+
+
+def _looks_like_contents(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    return _contents_entries(lines) >= max(2, len(lines) // 2)
+
+
+def _is_contents_page(blocks: list[Block]) -> bool:
+    """A contents page lists destinations, so nothing on it opens a chapter."""
+    text = "\n".join(block.text for block in blocks)
+    # Dot leaders are the strongest signal and survive OCR reflowing entries
+    # onto shared lines, which defeats any per-line rule.
+    if len(DOT_LEADER_RE.findall(text)) >= 3:
+        return True
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return False
+    return _contents_entries(lines) >= 0.6 * len(lines)
+
+
 def _classify_structure(
     blocks: list[Block], height: float, options: ConversionOptions
 ) -> None:
@@ -160,13 +200,28 @@ def _classify_structure(
     blocks[:] = expanded
     sizes = [b.font_size for b in blocks if b.text]
     body_size = statistics.median(sizes) if sizes else 12
+    contents_page = _is_contents_page(blocks)
     for block in blocks:
         compact = block.text.replace("\n", " ").strip()
-        if options.detect_chapters and (
-            HEADING_RE.match(compact)
-            or (block.font_size >= body_size * 1.28 and len(compact) < 140)
+        chapter_opener = bool(HEADING_RE.match(compact))
+        if (
+            options.detect_chapters
+            and not contents_page
+            and not _looks_like_contents(block.text)
+            and (
+                chapter_opener
+                or (block.font_size >= body_size * 1.28 and len(compact) < 140)
+            )
         ):
             block.type = BlockType.HEADING
+            # Only a recognised chapter opener, or markedly larger type, starts
+            # a new EPUB file. Anything else is a subheading inside the current
+            # one, so a title page cannot fragment the book into stubs.
+            block.heading_level = (
+                1
+                if chapter_opener or block.font_size >= body_size * 1.6
+                else 2
+            )
         elif (
             options.detect_footnotes
             and block.bbox[1] > height * 0.78
@@ -510,6 +565,9 @@ def analyze_pdf(
                     and (
                         quality.score < options.acceptable_threshold
                         or embedded_has_severe_issue
+                        or bool(
+                            BROKEN_EXTRACTION_REASONS.intersection(quality.reasons)
+                        )
                     )
                 )
             )
@@ -529,8 +587,13 @@ def analyze_pdf(
                             options.ocr_provider, ollama_model=options.ollama_model
                         )
                     if progress:
+                        # Tesseract has no model to name; every other provider
+                        # does, and which one ran is the first thing you want
+                        # to know when a page comes back wrong.
+                        model_name = getattr(ocr_provider, "model", None)
+                        via = f"OCR page {index + 1} via {ocr_provider.name}"
                         progress(
-                            f"OCR page {index + 1} via {ocr_provider.name}",
+                            f"{via} — {model_name}" if model_name else via,
                             index,
                             len(doc),
                         )
@@ -568,7 +631,11 @@ def analyze_pdf(
                         "metrics": ocr_metrics,
                     }
                     ocr_has_severe_issue = _has_severe_text_issue(ocr_blocks)
-                    choose_ocr = bool(ocr_blocks) and (
+                    # A quality score cannot tell a faithful read from an
+                    # invented one, so OCR must also account for the text the
+                    # page already had before it is allowed to replace it.
+                    ocr_covers_page = ocr_covers_embedded(embedded, ocr_text)
+                    choose_ocr = bool(ocr_blocks) and ocr_covers_page and (
                         options.mode == "force_ocr"
                         or (
                             not embedded
@@ -581,6 +648,12 @@ def analyze_pdf(
                             and ocr_quality.score >= options.acceptable_threshold
                         )
                         or ocr_quality.score >= quality.score + 0.08
+                        or (
+                            bool(quality.reasons)
+                            and not ocr_has_severe_issue
+                            and ocr_quality.score >= quality.score
+                            and ocr_quality.score >= options.acceptable_threshold
+                        )
                     )
                     if choose_ocr:
                         blocks = ocr_blocks
@@ -598,10 +671,23 @@ def analyze_pdf(
                         source = "embedded_text"
                         kind = PageType.BROKEN_TEXT
                         selection = PageSelection.REVIEW
-                        selection_reason = "OCR did not provide a clearly safer candidate"
-                        warnings.append(
-                            "Embedded and OCR candidates require review; retained embedded text"
-                        )
+                        if not ocr_covers_page:
+                            selection_reason = (
+                                "OCR did not account for the text already on "
+                                "the page"
+                            )
+                            warnings.append(
+                                "OCR dropped or replaced page content; "
+                                "retained embedded text"
+                            )
+                        else:
+                            selection_reason = (
+                                "OCR did not provide a clearly safer candidate"
+                            )
+                            warnings.append(
+                                "Embedded and OCR candidates require review; "
+                                "retained embedded text"
+                            )
                     else:
                         blocks = []
                         source = "unavailable"
@@ -632,10 +718,19 @@ def analyze_pdf(
                         selection = PageSelection.UNAVAILABLE
                         selection_reason = "No embedded text and OCR was unavailable"
             elif quality.score < options.good_threshold:
-                kind = PageType.BROKEN_TEXT
-                selection = PageSelection.REVIEW
-                selection_reason = "Embedded text is below the good-quality threshold"
-                warnings.append("Embedded text is only moderately reliable")
+                if quality.reasons:
+                    kind = PageType.BROKEN_TEXT
+                    selection = PageSelection.REVIEW
+                    selection_reason = (
+                        "Embedded text is below the good-quality threshold"
+                    )
+                    warnings.append("Embedded text is only moderately reliable")
+                else:
+                    # The score is held down by page length alone. A short page
+                    # with no detected defect is not a page that needs review.
+                    selection_reason = (
+                        "Embedded text is short but shows no quality defects"
+                    )
             elif image_heavy:
                 kind = PageType.HYBRID if embedded else PageType.IMAGE_HEAVY
             blocks = _reading_order(blocks, page.rect.width)
