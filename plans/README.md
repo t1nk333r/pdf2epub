@@ -24,10 +24,10 @@ for that.
 | 04 | Python 3.14, web-test hang, and runtime warnings | P1 | M | — | MERGED into `main` 2026-08-28 (`461a2b2`, `1e80bcb`); all gates verified first |
 | 05 | Durable pause, resume, and power-loss recovery | P1 | L | 04 | MERGED into `main` 2026-08-28 (`c4ce02b`, `45699f0`, `4053f41`, `5f56abb`); all gates verified first |
 | 06 | Stop a late pause stranding a finished book in `failed` | P1 | M | — | TODO |
-| 07 | Stream upload validation and resume hashing | P2 | S | — | TODO |
+| 07 | Stream upload validation and resume hashing | P2 | S | — | DONE — `advisor/exec-07` (`e3c2b0a`, `40fac35`), reviewed 2026-08-31; 120 pass |
 | 08 | Pin the progress-string contract the ETA depends on | P2 | S | — | TODO |
 | 09 | Verify Qur'anic quotations against a reference text | P3 | M | — | TODO — Step 0 is a go/no-go gate |
-| 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | TODO |
+| 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | DONE — `advisor/exec-10` (`d0ca2ab`), reviewed 2026-08-31; 119 pass |
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | TODO |
 
 Status values for active plans: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, or
