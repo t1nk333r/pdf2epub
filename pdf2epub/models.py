@@ -52,6 +52,7 @@ _JOB_TRANSITIONS = {
     },
     JobState.PAUSE_REQUESTED: {
         JobState.PAUSED,
+        JobState.BUILDING,
         JobState.FAILED,
         JobState.INTERRUPTED,
     },
@@ -64,7 +65,9 @@ _JOB_TRANSITIONS = {
     JobState.INTERRUPTED: {JobState.PROCESSING},
     JobState.COMPLETE: set(),
     # A failed job keeps its source and options, so it can be started over.
-    JobState.FAILED: {JobState.QUEUED},
+    # It can also be recovered as interrupted at startup if its checkpoints
+    # turn out to be complete (see `_recover_jobs`).
+    JobState.FAILED: {JobState.QUEUED, JobState.INTERRUPTED},
 }
 
 

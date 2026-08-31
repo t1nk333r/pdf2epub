@@ -316,6 +316,29 @@ def test_pause_is_idempotent_and_sets_page_boundary_event(client, tmp_path):
         web.jobs.pop(job.id, None)
 
 
+def test_pause_after_last_page_does_not_fail_the_job(tmp_path):
+    job = _persistent_job(tmp_path, JobState.PROCESSING)
+    try:
+        job.state = JobState.PAUSE_REQUESTED
+        job.pause_event.set()
+        web._update(job.id, "Building EPUB", 0, 1)
+        assert job.state == JobState.BUILDING
+        assert not job.pause_event.is_set()
+        assert any("too late" in entry["message"].lower() for entry in job.logs)
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_pause_is_rejected_once_the_build_stage_owns_the_job(client, tmp_path):
+    job = _persistent_job(tmp_path, JobState.BUILDING)
+    try:
+        response = client.post(f"/api/jobs/{job.id}/pause")
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "cannot_pause"
+    finally:
+        web.jobs.pop(job.id, None)
+
+
 def test_resume_is_idempotent_and_starts_one_worker(tmp_path, monkeypatch):
     job = _persistent_job(tmp_path)
     starts = []
@@ -361,6 +384,45 @@ def test_startup_recovery_marks_active_job_interrupted(tmp_path, monkeypatch):
         assert web.jobs[job.id].state == "interrupted"
         assert web.jobs[job.id].thread is None
         assert web.jobs[job.id].manifest.lease is None
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_failed_job_with_complete_checkpoints_recovers_as_interrupted(
+    tmp_path, monkeypatch
+):
+    job = _persistent_job(tmp_path, JobState.FAILED)
+    control = ConversionControl(job.store, job.manifest)
+    for number in range(1, job.manifest.page_count + 1):
+        control.page_committed(
+            PageResult(number, PageType.TEXT, "embedded_text", 100, 100)
+        )
+    web.jobs.pop(job.id)
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    web._recover_jobs()
+    try:
+        recovered = web.jobs[job.id]
+        assert recovered.state == "interrupted"
+        assert recovered.blocked_code == "publication_failed"
+        assert recovered.public()["can_resume"] is True
+    finally:
+        web.jobs.pop(job.id, None)
+
+
+def test_failed_job_with_incomplete_checkpoints_stays_failed(tmp_path, monkeypatch):
+    job = _persistent_job(tmp_path, JobState.FAILED)
+    control = ConversionControl(job.store, job.manifest)
+    for number in range(1, job.manifest.page_count):
+        control.page_committed(
+            PageResult(number, PageType.TEXT, "embedded_text", 100, 100)
+        )
+    web.jobs.pop(job.id)
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    web._recover_jobs()
+    try:
+        recovered = web.jobs[job.id]
+        assert recovered.state == "failed"
+        assert recovered.public()["can_resume"] is False
     finally:
         web.jobs.pop(job.id, None)
 
