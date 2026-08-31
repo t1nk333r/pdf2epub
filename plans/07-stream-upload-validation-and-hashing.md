@@ -7,7 +7,7 @@
 > `plans/README.md` unless a reviewer says they maintain the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat a4a6e56..HEAD -- pdf2epub/web.py tests/test_web.py`
+> `git diff --stat 3a33d7b..HEAD -- pdf2epub/web.py tests/test_web.py`
 > If an in-scope file changed since this plan was written, compare the
 > "Current state" excerpts against the live code before proceeding. A material
 > mismatch is a STOP condition.
@@ -26,7 +26,7 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: perf
-- **Planned at**: commit `a4a6e56`, amended 2026-08-31
+- **Planned at**: commit `3a33d7b`, amended 2026-08-31
 
 ## Why this matters
 

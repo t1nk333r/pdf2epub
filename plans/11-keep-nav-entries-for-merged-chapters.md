@@ -7,9 +7,9 @@
 > `plans/README.md` unless a reviewer says they maintain the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat a4a6e56..HEAD -- pdf2epub/epub.py tests/test_epub.py`
+> `git diff --stat 3a33d7b..HEAD -- pdf2epub/epub.py tests/test_epub.py`
 >
-> If any in-scope file changed since `a4a6e56`, compare the "Current state"
+> If any in-scope file changed since `3a33d7b`, compare the "Current state"
 > excerpts against the live code before proceeding; a material mismatch is a
 > STOP condition.
 
@@ -20,7 +20,7 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: correctness
-- **Planned at**: commit `a4a6e56`, 2026-08-31
+- **Planned at**: commit `3a33d7b`, 2026-08-31
 
 ## Why this matters
 
