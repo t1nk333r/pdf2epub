@@ -92,8 +92,8 @@ def test_semantic_headings_footnotes_and_rtl_body(tmp_path):
         assert '<body epub:type="bodymatter" dir="rtl" lang="ar">' in chapters
         assert "<h1>الفصل</h1>" in chapters
         assert "<h2>المبحث</h2>" in chapters
-        assert '<a epub:type="noteref" href="#fn-1">1</a>' in chapters
-        assert 'epub:type="footnote" class="footnote" id="fn-1"' in chapters
+        assert '<a epub:type="noteref" href="#fn-1-1">1</a>' in chapters
+        assert 'epub:type="footnote" class="footnote" id="fn-1-1"' in chapters
 
 
 def test_invalid_image_prevents_epub_publication(tmp_path):
@@ -126,3 +126,27 @@ def test_epubcheck_receives_an_epub_suffixed_temporary_file(tmp_path, monkeypatc
     build_epub(DocumentResult("كتاب"), output)
     assert captured["path"].endswith(".epub")
     assert output.exists()
+
+
+def test_stub_front_matter_is_folded_into_one_chapter():
+    from pdf2epub.epub import _merge_stub_chapters
+
+    chapters = _merge_stub_chapters(
+        [
+            ("العنوان", "<h1>العنوان</h1>"),
+            ("العنوان مرة أخرى", "<h1>العنوان مرة أخرى</h1><p>المؤلف</p>"),
+            ("الباب الأول", "<h1>الباب الأول</h1><p>" + "نص طويل جداً " * 40 + "</p>"),
+        ]
+    )
+
+    assert len(chapters) == 2
+    assert chapters[0][0] == "العنوان"
+    assert "العنوان مرة أخرى" in chapters[0][1]
+    assert chapters[1][0] == "الباب الأول"
+
+
+def test_a_single_short_chapter_is_left_alone():
+    from pdf2epub.epub import _merge_stub_chapters
+
+    chapters = _merge_stub_chapters([("قصير", "<p>نص</p>")])
+    assert len(chapters) == 1

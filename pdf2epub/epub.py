@@ -138,12 +138,15 @@ def _xhtml(title: str, body: str) -> str:
 FOOTNOTE_REF_RE = re.compile(r"\[\^([^\]]+)\]")
 
 
-def _footnote_target(identifier: str) -> str:
+def _footnote_target(identifier: str, page: int) -> str:
+    # Footnote numbering restarts on every page, so the id has to carry the
+    # page too: one chapter file now holds several pages and EPUBCheck rejects
+    # a duplicate id.
     safe = re.sub(r"[^\w.-]+", "-", identifier, flags=re.UNICODE).strip("-")
-    return f"fn-{safe or 'note'}"
+    return f"fn-{page}-{safe or 'note'}"
 
 
-def _inline_html(text: str, fix_bidi: bool) -> str:
+def _inline_html(text: str, fix_bidi: bool, page: int = 1) -> str:
     pieces: list[str] = []
     end = 0
     for match in FOOTNOTE_REF_RE.finditer(text):
@@ -151,7 +154,7 @@ def _inline_html(text: str, fix_bidi: bool) -> str:
         pieces.append(wrap_ltr(plain) if fix_bidi else html.escape(plain))
         identifier = match.group(1)
         pieces.append(
-            f'<a epub:type="noteref" href="#{_footnote_target(identifier)}">'
+            f'<a epub:type="noteref" href="#{_footnote_target(identifier, page)}">'
             f'{html.escape(identifier)}</a>'
         )
         end = match.end()
@@ -160,10 +163,32 @@ def _inline_html(text: str, fix_bidi: bool) -> str:
     return "".join(pieces)
 
 
-def _block_html(block, fix_bidi: bool = True) -> str:
+# A cover, a half-title and a colophon each carry a large line of type that
+# reads as a heading. Emitting one file per such line fragments the front
+# matter into stubs, so anything this short is folded into its neighbour.
+MIN_CHAPTER_TEXT = 240
+
+
+def _merge_stub_chapters(chapters: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    merged: list[tuple[str, str]] = []
+    for title, body in chapters:
+        visible = len(re.sub(r"<[^>]+>", "", body).strip())
+        if merged and visible < MIN_CHAPTER_TEXT:
+            previous_title, previous_body = merged[-1]
+            merged[-1] = (previous_title, previous_body + body)
+        else:
+            merged.append((title, body))
+    # A cover and a half-title carry the same words; keep one file, not two.
+    if len(merged) > 1 and merged[0][0].strip() == merged[1][0].strip():
+        merged[0] = (merged[0][0], merged[0][1] + merged[1][1])
+        del merged[1]
+    return merged
+
+
+def _block_html(block, fix_bidi: bool = True, page: int = 1) -> str:
     if block.type == BlockType.IMAGE and block.image_path:
         return f'<figure><img src="../images/{html.escape(block.image_path)}" alt=""/></figure>'
-    content = _inline_html(block.text, fix_bidi).replace("\n", "<br/>")
+    content = _inline_html(block.text, fix_bidi, page).replace("\n", "<br/>")
     if block.type == BlockType.HEADING:
         level = 2 if block.heading_level == 2 else 1
         return f"<h{level}>{content}</h{level}>"
@@ -171,11 +196,11 @@ def _block_html(block, fix_bidi: bool = True) -> str:
         identifier = block.footnote_id or "note"
         return (
             f'<aside epub:type="footnote" class="footnote" '
-            f'id="{_footnote_target(identifier)}">{content}</aside>'
+            f'id="{_footnote_target(identifier, page)}">{content}</aside>'
         )
     if block.type == BlockType.POETRY:
         lines = "".join(
-            f"<p>{_inline_html(line, fix_bidi)}</p>"
+            f"<p>{_inline_html(line, fix_bidi, page)}</p>"
             for line in block.text.splitlines()
             if line
         )
@@ -211,11 +236,12 @@ def build_epub(
                         chapters.append((current_title, "".join(current)))
                         current = []
                     current_title = block.text.strip()[:160]
-                current.append(_block_html(block, document.fix_bidi))
+                current.append(_block_html(block, document.fix_bidi, page.page))
         if current or not chapters:
             chapters.append(
                 (current_title, "".join(current) or "<p>لا يوجد نص قابل للاستخراج.</p>")
             )
+        chapters = _merge_stub_chapters(chapters)
         manifest: list[str] = [
             '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
             '<item id="css" href="css/book.css" media-type="text/css"/>',
