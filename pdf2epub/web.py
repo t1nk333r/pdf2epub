@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .checkpoints import (
+    MAX_CHECKPOINT_BYTES,
     CheckpointError,
     CheckpointStore,
     ConversionControl,
@@ -35,8 +36,20 @@ from .ocr import (
     provider_names,
     provider_status,
 )
-from .pipeline import ConversionIntegrityError, ConversionPublicationError, convert
+from .pipeline import (
+    ConversionIntegrityError,
+    ConversionPublicationError,
+    _quality_summary,
+    _summary_path,
+    convert,
+)
 from .settings import clear_runtime_settings, public_settings, update_runtime_settings
+
+# Sidecar summaries are the full report minus page_details, so 1 MiB comfortably
+# covers real books; this only bounds the legacy fallback that re-derives the
+# summary from a full quality-report.json for jobs converted before the sidecar
+# existed.
+MAX_REPORT_SUMMARY_BYTES = 1 * 1024 * 1024
 
 
 @asynccontextmanager
@@ -219,12 +232,24 @@ def _job_from_manifest(store: CheckpointStore, manifest: JobManifest) -> Job:
     )
 
 
-def _quality_summary(report: dict) -> dict:
-    summary = dict(report)
-    page_details = summary.pop("page_details", [])
-    summary["page_details_count"] = len(page_details)
-    summary["full_page_details"] = "Available in the downloaded quality report"
-    return summary
+def _job_quality(report_path: Path) -> dict | None:
+    """Load the quality summary for a finished job, bounded and cheap.
+
+    Prefers the small sidecar written alongside the report (`pipeline.py`
+    writes it once, at conversion time). Falls back to parsing the full
+    report — guarded by the same size limit `CheckpointStore` uses — only for
+    jobs converted before the sidecar existed. Either guard tripping degrades
+    to `None` rather than raising, so an oversized artifact never turns a
+    status view into a 500.
+    """
+    summary_path = _summary_path(report_path)
+    if summary_path.is_file():
+        if summary_path.stat().st_size > MAX_REPORT_SUMMARY_BYTES:
+            return None
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+    if not report_path.is_file() or report_path.stat().st_size > MAX_CHECKPOINT_BYTES:
+        return None
+    return _quality_summary(json.loads(report_path.read_text(encoding="utf-8")))
 
 
 def _recover_completed_job(job_id: str) -> Job | None:
@@ -335,7 +360,12 @@ def _run(job_id: str, pdf: Path, options: ConversionOptions) -> None:
             control=control,
             output_stem=Path(job.filename).stem,
         )
-        report = json.loads(outputs["report"].read_text(encoding="utf-8"))
+        report_path = outputs["report"]
+        if report_path.stat().st_size > MAX_CHECKPOINT_BYTES:
+            raise ValueError(
+                f"Quality report exceeds the {MAX_CHECKPOINT_BYTES}-byte read limit"
+            )
+        report = json.loads(report_path.read_text(encoding="utf-8"))
         stage = (
             "Complete — review required"
             if report.get("integrity", {}).get("status") == "review"
@@ -930,9 +960,7 @@ def job_status(job_id: str) -> dict:
         }
         report = Path(data["outputs"].get("report", ""))
         if report.exists():
-            data["quality"] = _quality_summary(
-                json.loads(report.read_text(encoding="utf-8"))
-            )
+            data["quality"] = _job_quality(report)
     data.pop("outputs", None)
     return data
 
