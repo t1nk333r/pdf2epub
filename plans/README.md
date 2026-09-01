@@ -30,6 +30,7 @@ for that.
 | 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | DONE — `advisor/exec-10` (`d0ca2ab`), reviewed 2026-08-31; 119 pass |
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
 | 12 | Flag likely dropped characters in OCR output | P2 | M | — | DONE — `advisor/exec-12` (`6790031`, `4acb0c5`), reviewed 2026-09-01; merged |
+| 13 | Tune the OCR prompt behind a benchmark | P2 | L | — | PARTIAL — steps 1–6 merged (`advisor/exec-13`); step 7 (measurement) needs a corpus and a GPU |
 
 Status values for active plans: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, or
 `REJECTED`. Historical plans predate this index and are not execution tasks.
@@ -505,3 +506,42 @@ to match the tests it specifies. The one defect found was drift, not error —
 One test deliberately pins a known false positive (`سلفا→سلف`) rather than
 hiding it. Keep that when tuning: if the noise is ever filtered, that test
 should be updated to document the new behaviour, not deleted.
+
+
+## Plan 13 — 2026-09-01 (steps 1-6)
+
+Written by Fable, executed by Sonnet, reviewed and merged. **151 tests pass.**
+
+Landed: `numeral_mismatches()` in `text.py`, a `prompt` field on both vision
+providers (defaulting to `OCR_PROMPT`, so no behaviour change), the
+`benchmarks/prompt_bench.py` harness, and three candidate prompt variants.
+
+**Steps 7 and 8 were deliberately not executed.** Step 7 is the measurement:
+it needs a real Arabic corpus and live GPU OCR, and the plan marks it
+operator-run and not automatically verifiable. Step 8 lands a prompt only on a
+Step 7 ACCEPT. An executor cannot produce that result, and claiming it would be
+worse than not running it.
+
+The plan said no three times, each time for a verified reason:
+
+- **The prompt does not become a runtime setting.** It is 806 characters
+  against the 512-char cap for non-secret settings (`settings.py:113`), so it
+  would fail validation; settings are read live per call, so a mid-job edit
+  would mix prompts inside one book; and `processing_contract` recomputes from
+  current code constants at resume, so a mutable global prompt breaks
+  resume-safety without a manifest schema change.
+- **No contents-page prompt variant.** `_is_contents_page` runs after OCR and
+  cannot select a prompt without doubling the measurement matrix.
+- **Prompt quality is not automatically verifiable.** A human spot-check is
+  named as a gate rather than faked.
+
+It also found a landmine: `tests/test_jobs.py:111` monkeypatches
+`OCR_CONTRACT_VERSION` to the literal `"arabic-ocr-v2"` while the real value is
+`"arabic-ocr-v1"`. Any prompt change must bump the contract or resumed jobs
+silently mix prompts — and that bump collides with this sentinel, quietly
+gutting the test. Steps 1-6 do not bump it, so nothing was changed; **whoever
+executes step 8 must change the sentinel in the same commit.**
+
+The harness self-validates offline: it REJECTs a deliberately worse prompt and
+ACCEPTs the reverse, so the decision rule demonstrably distinguishes better
+from worse before it is ever pointed at real data.
