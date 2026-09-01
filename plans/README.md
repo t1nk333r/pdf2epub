@@ -31,13 +31,13 @@ for that.
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
 | 12 | Flag likely dropped characters in OCR output | P2 | M | — | DONE — `advisor/exec-12` (`6790031`, `4acb0c5`), reviewed 2026-09-01; merged |
 | 13 | Tune the OCR prompt behind a benchmark | P2 | L | — | PARTIAL — steps 1–6 merged (`advisor/exec-13`); step 7 (measurement) needs a corpus and a GPU |
-| 14 | Isolate the test suite from the real job store | P1 | S | — | TODO — **execute first**; reproduced data-touch risk |
-| 15 | Fsync the published EPUB and report | P1 | S | 14* | TODO |
-| 16 | Bound and cache the quality-report reads | P2 | S | 14* | TODO |
-| 17 | Cover the uncovered selection branches | P2 | M | 14* | TODO — prerequisite for the selection-policy extraction |
-| 18 | Close the small audit gaps (6 one-liners) | P2 | S | 14* | TODO |
-| 19 | Unblock local model experimentation | P3 | S/M | 14* | TODO |
-| 20 | Flag same-length word substitutions | P3 | M | 14* | TODO — Step 0 measurement gate may REJECT it |
+| 14 | Isolate the test suite from the real job store | P1 | S | — | DONE — `advisor/exec-14` (`3836790`), merged; removal-proof verified |
+| 15 | Fsync the published EPUB and report | P1 | S | 14* | DONE — `advisor/exec-15` (`d222b6c`), merged |
+| 16 | Bound and cache the quality-report reads | P2 | S | 14* | DONE — `advisor/exec-16` (`24ff023`), merged; pipeline.py conflict with 15 resolved keeping both guarantees |
+| 17 | Cover the uncovered selection branches | P2 | M | 14* | DONE — `advisor/exec-17` (`e1e9a41`), merged; zero source changes; found IMAGE_HEAVY unreachable |
+| 18 | Close the small audit gaps (6 one-liners) | P2 | S | 14* | DONE — `advisor/exec-18` (6 commits), merged |
+| 19 | Unblock local model experimentation | P3 | S/M | 14* | DONE — `advisor/exec-19`, merged; a 6th enforcement site (cli.py) found and fixed per the plan's own STOP clause |
+| 20 | Flag same-length word substitutions | P3 | M | 14* | BLOCKED — Step 0 needs a quality report on disk; the job store is empty. Unblocks after any conversion |
 
 Status values for active plans: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, or
 `REJECTED`. Historical plans predate this index and are not execution tasks.
@@ -608,3 +608,41 @@ audit sandbox) — worth running manually.
 14 lands that suite can rewrite real job manifests). 15–18 in any order after;
 19 before any model-comparison work; 20 gated on its own Step 0 measurement.
 The starred dependency on 14 is operational, not code-level.
+
+
+## Execution round 3 — 2026-09-01: plans 14-19 merged
+
+14 executed alone first (data-safety), then 15-18 in parallel worktrees, then
+19. Suite: 151 → **178 passing**; ruff clean throughout. Reviewer re-ran every
+plan's done criteria on each merged tree, not just in the branches. Two merge
+conflicts (pipeline.py between 15 and 16; a web.py import between 16 and 18)
+resolved keeping both sides' guarantees, with 15's recording test acting as
+the tripwire for the pipeline resolution.
+
+**End-to-end proof of plan 19's purpose**: with
+`PDF2EPUB_OLLAMA_EXTRA_MODELS` set to the pulled Qari v0.3 GGUF, the model
+appears in the allowed list and `create_ocr_provider` builds a provider for
+it — the experimentation path is genuinely open. Defaults verified
+byte-identical when the variable is unset.
+
+**New finding from plan 17 (recorded, not fixed — characterization only):**
+`PageType.IMAGE_HEAVY` is unreachable through `analyze_pdf`. `use_ocr`
+contains `or not embedded` as a top-level term, so a page without embedded
+text always takes the OCR branch before `elif image_heavy:` can assign
+IMAGE_HEAVY, and the only bypass (`intentional_blank`) requires `not images`,
+contradicting image-heavy by definition. Verified empirically: an image-heavy
+textless page yields selection=ocr, page_type=SCAN. The enum value has been
+dead since it was written; the report's page_types counter for it can never
+be nonzero. Candidate fixes: remove the value, or reorder the classification
+— either changes report semantics and deserves its own small plan.
+
+**Executor-found defects in the round's plans (the running theme):**
+plan 14's own code snippet had a Path-precedence bug and its conftest test
+placement was uncollectable; plan 19's enforcement-site count missed cli.py.
+All were caught by executors through escape hatches the plans provided.
+
+**Remaining from the deep audit, unplanned**: Tesseract provider tests,
+EPUBCheck failure-path tests, lockfile (tooling decision needed), import-mode
+fragility, dynamic UI model list (TECHDEBT-01 — now more valuable since extra
+models exist but the dropdown still hardcodes three), CLAUDE.md, venv rebuild,
+and the LOW-confidence tail.
