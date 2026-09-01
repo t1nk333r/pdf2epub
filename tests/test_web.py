@@ -899,3 +899,12 @@ def test_home_has_job_delete_controls(client):
     body = client.get("/").text
     assert 'id="clear-jobs"' in body
     assert "'/api/jobs/'+job.id,{method:'DELETE'}" in body
+
+
+def test_provider_option_labels_isolate_the_latin_engine_name(client):
+    # Engine names are Latin, their qualifiers Arabic. Without a bidi isolate
+    # the runs reorder inside the RTL <select> and the name is torn away from
+    # its status. U+2068/U+2069 keep the name atomic.
+    body = client.get("/").text
+    assert "\\u2068" in body and "\\u2069" in body
+    assert "'\\u2068'+provider.label+'\\u2069'" in body
