@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from pdf2epub import pipeline, web
 from pdf2epub.checkpoints import (
+    MAX_CHECKPOINT_BYTES,
     CheckpointStore,
     ConversionControl,
     JobManifest,
@@ -62,6 +63,30 @@ def test_quality_summary_omits_large_page_details():
     assert report["page_details"]
 
 
+def test_conversion_writes_a_summary_sidecar_matching_the_full_report(tmp_path):
+    source = tmp_path / "book.pdf"
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_text((72, 72), "page one embedded text")
+    pdf.save(source)
+    pdf.close()
+
+    outputs = pipeline.convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(
+            mode="prefer_text", preserve_images=False, require_epubcheck=False
+        ),
+    )
+
+    report_path = outputs["report"]
+    summary_path = report_path.with_name("quality-summary.json")
+    assert summary_path.is_file()
+    full_report = json.loads(report_path.read_text(encoding="utf-8"))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary == _quality_summary(full_report)
+
+
 def test_completed_job_is_recovered_after_restart(tmp_path, monkeypatch):
     job_id = "a" * 32
     output = tmp_path / job_id / "output"
@@ -75,6 +100,51 @@ def test_completed_job_is_recovered_after_restart(tmp_path, monkeypatch):
     assert recovered is not None
     assert recovered.state == "complete"
     assert recovered.outputs["epub"].endswith("book.epub")
+
+
+def test_status_view_uses_the_summary_sidecar(client, tmp_path, monkeypatch):
+    job_id = "b" * 32
+    output = tmp_path / job_id / "output"
+    output.mkdir(parents=True)
+    (output / "book.epub").write_bytes(b"epub")
+
+    full_report = {
+        "pages": 12,
+        "integrity": {"status": "passed"},
+        "page_details": [{"page": i, "blocks": ["text"]} for i in range(12)],
+    }
+    expected_summary = _quality_summary(full_report)
+    (output / "quality-summary.json").write_text(json.dumps(expected_summary))
+    # Oversized, unparseable junk in place of the real report: if the status
+    # view ever falls back to reading this file, json.loads blows up and the
+    # request 500s instead of returning 200 — proving the sidecar path never
+    # touches it.
+    (output / "quality-report.json").write_text("{not valid json," * 2_000_000)
+
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    web.jobs.pop(job_id, None)
+
+    response = client.get(f"/api/jobs/{job_id}")
+    assert response.status_code == 200
+    assert response.json()["quality"] == expected_summary
+
+
+def test_oversized_report_degrades_instead_of_erroring(client, tmp_path, monkeypatch):
+    job_id = "c" * 32
+    output = tmp_path / job_id / "output"
+    output.mkdir(parents=True)
+    (output / "book.epub").write_bytes(b"epub")
+    # No quality-summary.json: this simulates a job converted before the
+    # sidecar existed, so the status view must fall back to the full report —
+    # guarded, and degrading instead of raising once it is over the cap.
+    (output / "quality-report.json").write_bytes(b"0" * (MAX_CHECKPOINT_BYTES + 1))
+
+    monkeypatch.setattr(web, "JOB_ROOT", tmp_path)
+    web.jobs.pop(job_id, None)
+
+    response = client.get(f"/api/jobs/{job_id}")
+    assert response.status_code == 200
+    assert response.json().get("quality") is None
 
 
 def test_recovery_rejects_invalid_job_ids(tmp_path, monkeypatch):
