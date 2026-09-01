@@ -22,6 +22,7 @@ from .text import (
     BROKEN_EXTRACTION_REASONS,
     HEADING_RE,
     SEVERE_TEXT_REASONS,
+    dropped_character_findings,
     evaluate_text,
     normalize_arabic,
     ocr_covers_embedded,
@@ -668,6 +669,30 @@ def analyze_pdf(
                             if not embedded
                             else "OCR passed quality checks that embedded text failed"
                         )
+                        if embedded:
+                            dropped = dropped_character_findings(embedded, ocr_text)
+                            if dropped:
+                                # Review hint only (~50% precision): the pairs
+                                # are reported, never applied to the text.
+                                candidates[f"ocr:{provider_name}"][
+                                    "dropped_character_candidates"
+                                ] = [
+                                    {"embedded": kept, "ocr": read}
+                                    for kept, read in dropped
+                                ]
+                                shown = "; ".join(
+                                    f"{kept}→{read}" for kept, read in dropped[:8]
+                                )
+                                more = (
+                                    f"; and {len(dropped) - 8} more"
+                                    if len(dropped) > 8
+                                    else ""
+                                )
+                                warnings.append(
+                                    "OCR may have dropped a character in "
+                                    f"{len(dropped)} word(s) "
+                                    f"(embedded→ocr): {shown}{more}"
+                                )
                     elif embedded:
                         blocks = embedded_blocks
                         source = "embedded_text"

@@ -463,3 +463,55 @@ def test_a_provider_without_a_model_keeps_the_plain_message(tmp_path):
         ocr_provider=FakeOcrProvider(),
     )
     assert "OCR page 1 via test_provider" in stages
+
+
+_DROP_FILLER_LINES = [
+    "This paragraph exists only to push the embedded text layer of",
+    "the page over the two hundred character comparability floor",
+    "that guards the dropped character cross check from meaningless",
+    "short pages of front matter or bare headings in the document.",
+]
+_DROP_EMBEDDED_LINES = _DROP_FILLER_LINES + [
+    "Careful planning prevents failure during conversion runs.",
+]
+
+
+class DroppedCharacterOcrProvider:
+    """Re-reads the page faithfully except one word loses one letter."""
+
+    name = "dropper"
+
+    def recognize(self, image_png: bytes, language: str) -> OcrResult:
+        text = "\n".join(_DROP_FILLER_LINES)
+        text += "\nCareful planing prevents failure during conversion runs."
+        return OcrResult(text, 0.95, self.name, model="drop-model")
+
+
+def test_dropped_character_hint_does_not_block_publication(tmp_path):
+    # OCR wins the page but read "planning" as "planing". The page must keep
+    # the OCR text, carry a review warning with both forms, expose the pair
+    # in the candidates dict, and still publish: integrity is untouched.
+    source = tmp_path / "drop.pdf"
+    _text_pdf(source, _DROP_EMBEDDED_LINES)
+
+    outputs = convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(
+            mode="force_ocr", preserve_images=False, require_epubcheck=False
+        ),
+        ocr_provider=DroppedCharacterOcrProvider(),
+    )
+
+    report = json.loads(outputs["report"].read_text())
+    detail = report["page_details"][0]
+    assert detail["selection"] == "ocr"
+    assert detail["candidates"]["ocr:dropper"]["dropped_character_candidates"] == [
+        {"embedded": "planning", "ocr": "planing"}
+    ]
+    assert any(
+        warning.startswith("OCR may have dropped a character")
+        for warning in detail["warnings"]
+    )
+    assert report["integrity"]["status"] == "passed"
+    assert outputs["epub"].exists()
