@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 
 from .models import TextQuality
 
@@ -121,6 +122,39 @@ def dropped_character_findings(embedded: str, ocr: str) -> list[tuple[str, str]]
                 findings.append((word, shorter))
                 break
     return findings
+
+
+# Digits in either direction: Western, Arabic-Indic, and Eastern
+# Arabic-Indic (Persian) forms all appear in printed Arabic books.
+NUMERAL_RE = re.compile(r"[0-9٠-٩۰-۹]+")
+_WESTERN_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩"
+    "۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def numeral_mismatches(embedded: str, ocr: str) -> tuple[list[str], list[str]]:
+    """Numbers whose *value* differs between the embedded layer and OCR.
+
+    Both texts' digit runs are mapped to Western digits before comparison, so
+    `٩٣` and `93` agree while `٩٣` and `73` do not — a measured failure on a
+    real conversion (page 18: embedded `73`, OCR read `٩٣`). Returns
+    (numbers only the embedded layer has, numbers only the OCR text has) as
+    sorted multisets. Like `dropped_character_findings`, this is a review
+    signal, not a correction: either side can be the wrong one.
+    """
+    if len(embedded.strip()) < MIN_COMPARABLE_TEXT:
+        return ([], [])
+
+    def tokens(text: str) -> Counter[str]:
+        return Counter(
+            match.translate(_WESTERN_DIGITS)
+            for match in NUMERAL_RE.findall(normalize_arabic(text))
+        )
+
+    left, right = tokens(embedded), tokens(ocr)
+    return (sorted((left - right).elements()), sorted((right - left).elements()))
 
 
 def evaluate_text(text: str) -> TextQuality:
