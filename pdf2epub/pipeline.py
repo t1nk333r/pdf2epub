@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .analyzer import analyze_pdf
-from .checkpoints import ConversionControl
+from .checkpoints import ConversionControl, durable_replace
 from .epub import EpubValidationError, build_epub
 from .models import ConversionOptions, JobState, require_transition
 from .ocr import OcrProvider
@@ -44,7 +44,9 @@ def _write_report(document, report_path: Path) -> None:
                 document.report(), handle, ensure_ascii=False, indent=2, default=str
             )
             handle.write("\n")
-        os.replace(temporary, report_path)
+            handle.flush()
+            os.fsync(handle.fileno())
+        durable_replace(temporary, report_path)
     finally:
         temporary.unlink(missing_ok=True)
 

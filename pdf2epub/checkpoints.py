@@ -43,6 +43,30 @@ class PauseRequested(RuntimeError):
     """Expected control flow raised after a durable page boundary."""
 
 
+def durable_replace(temporary: str | Path, destination: Path) -> None:
+    """Rename ``temporary`` over ``destination``, then fsync the directory.
+
+    The caller is responsible for fsyncing the temporary file's own
+    descriptor before calling this (that fsync belongs at the write site,
+    right after the data is flushed, so it stays close to the buffered
+    writes it covers). This helper performs the rename that makes the new
+    name visible and the follow-up directory fsync that makes the rename
+    itself survive power loss. Extracted from ``_atomic_json`` so the
+    quality report and EPUB writers share the same durability guarantee as
+    checkpoints.
+    """
+    temporary = Path(temporary)
+    os.replace(temporary, destination)
+    try:
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
+
+
 @dataclass(slots=True)
 class ConversionControl:
     store: CheckpointStore
@@ -247,15 +271,7 @@ class CheckpointStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            try:
-                directory_fd = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-            except OSError:
-                pass
+            durable_replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
 
