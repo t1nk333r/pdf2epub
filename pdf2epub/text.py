@@ -56,6 +56,17 @@ def word_overlap(left: str, right: str) -> float:
     return len(left_words & right_words) / len(left_words)
 
 
+# Contents pages pad every entry with dot leaders. They are decoration, not
+# content: OCR reproduces the entry and drops the dots, and on a real page
+# two thirds of the embedded characters can be leaders. Comparing raw lengths
+# then reads correct output as a two-thirds content loss.
+LEADER_RE = re.compile(r"\.{2,}")
+
+
+def _comparable_length(text: str) -> int:
+    return len(LEADER_RE.sub(" ", text).strip())
+
+
 def ocr_covers_embedded(embedded: str, ocr: str) -> bool:
     """Is the OCR read a plausible transcription of the same page?
 
@@ -67,7 +78,7 @@ def ocr_covers_embedded(embedded: str, ocr: str) -> bool:
     """
     if len(embedded.strip()) < MIN_COMPARABLE_TEXT:
         return True
-    if len(ocr.strip()) < len(embedded.strip()) * MIN_LENGTH_RATIO:
+    if _comparable_length(ocr) < _comparable_length(embedded) * MIN_LENGTH_RATIO:
         return False
     return word_overlap(embedded, ocr) >= MIN_WORD_OVERLAP
 

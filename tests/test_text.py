@@ -157,3 +157,30 @@ def test_dropped_character_check_requires_exactly_one_missing_character():
 def test_dropped_character_check_is_silent_on_identical_texts():
     embedded = _FILLER + "كان الانحياز للتخندق الفكري واضحا."
     assert dropped_character_findings(embedded, embedded) == []
+
+
+def test_dot_leaders_do_not_look_like_dropped_content():
+    from pdf2epub.text import ocr_covers_embedded
+
+    # A contents page pads every entry with dot leaders. OCR reproduces the
+    # entries and omits the decoration, which is correct — the length gap is
+    # typography, not lost text, and must not be read as a failed read.
+    entries = [
+        "مقدمة" + "." * 48 + " 18",
+        "التطور الصغير" + "." * 40 + " 28",
+        "التطور الكبير" + "." * 40 + " 38",
+        "النوع" + "." * 48 + " 53",
+        "الانتخاب الطبيعي" + "." * 36 + " 77",
+    ]
+    embedded = "\n".join(entries)
+    ocr = "\n".join(e.replace(".", "").replace("  ", " ") for e in entries)
+    assert ocr_covers_embedded(embedded, ocr)
+
+
+def test_genuine_truncation_is_still_refused():
+    from pdf2epub.text import ocr_covers_embedded
+
+    # Stripping leaders must not blind the gate to real content loss.
+    embedded = "هذه فقرة كاملة من نص الكتاب تحتوي على كلمات كثيرة ومفيدة جدا. " * 6
+    truncated = "هذه فقرة كاملة من نص الكتاب"
+    assert not ocr_covers_embedded(embedded, truncated)
