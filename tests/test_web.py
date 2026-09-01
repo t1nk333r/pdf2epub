@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -250,6 +251,20 @@ def test_home_contains_settings_dialog(client):
     assert 'class="layout"' in response.text
     assert 'class="col-side"' in response.text
     assert 'id="retry"' in response.text
+
+
+def test_js_state_maps_cover_every_job_state():
+    labels_match = re.search(r"stateLabelsAr=\{([^}]*)\}", web.INDEX_HTML)
+    messages_match = re.search(
+        r"const messages=\{([^}]*)\};message\.textContent", web.INDEX_HTML
+    )
+    assert labels_match is not None
+    assert messages_match is not None
+    label_keys = set(re.findall(r"(\w+):", labels_match.group(1)))
+    message_keys = set(re.findall(r"(\w+):", messages_match.group(1)))
+    expected = {state.value for state in JobState}
+    assert label_keys == expected
+    assert message_keys == expected
 
 
 def test_job_logs_are_structured_bounded_and_public(monkeypatch):
