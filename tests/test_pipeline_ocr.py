@@ -3,17 +3,19 @@ import json
 import re
 import zipfile
 from dataclasses import asdict
+from pathlib import Path
 
 import pymupdf
 import pytest
 from PIL import Image
 
-from pdf2epub import pipeline
+from pdf2epub import epub, pipeline
 from pdf2epub.checkpoints import (
     CheckpointStore,
     ConversionControl,
     JobManifest,
     PauseRequested,
+    durable_replace,
     processing_contract,
 )
 from pdf2epub.models import ConversionOptions, JobState
@@ -95,6 +97,35 @@ def test_custom_provider_runs_through_complete_pipeline(tmp_path):
         assert re.search(r"<h1[^>]*>الفصل الأول</h1>", chapter)
         assert 'epub:type="noteref" href="#fn-1-1"' in chapter
         assert 'epub:type="footnote" class="footnote" id="fn-1-1"' in chapter
+
+
+def test_report_and_epub_publish_via_durable_replace(tmp_path, monkeypatch):
+    source = tmp_path / "scan.pdf"
+    pdf = pymupdf.open()
+    pdf.new_page()
+    pdf.save(source)
+    pdf.close()
+
+    calls: list[Path] = []
+
+    def recording_durable_replace(temporary, destination):
+        calls.append(Path(destination))
+        durable_replace(temporary, destination)
+
+    monkeypatch.setattr(pipeline, "durable_replace", recording_durable_replace)
+    monkeypatch.setattr(epub, "durable_replace", recording_durable_replace)
+
+    outputs = convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(
+            mode="force_ocr", preserve_images=False, require_epubcheck=False
+        ),
+        ocr_provider=FakeOcrProvider(),
+    )
+
+    assert outputs["report"] in calls
+    assert outputs["epub"] in calls
 
 
 def test_missing_scan_ocr_blocks_normal_epub_publication(tmp_path):

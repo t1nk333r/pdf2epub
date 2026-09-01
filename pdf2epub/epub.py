@@ -15,6 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 from xml.etree import ElementTree
 
+from .checkpoints import durable_replace
 from .models import BlockType, DocumentResult
 from .text import wrap_ltr
 
@@ -350,10 +351,12 @@ def build_epub(
                             item.relative_to(root),
                             compress_type=zipfile.ZIP_DEFLATED,
                         )
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
             _validate_internal(temporary)
             if validate:
                 warnings.extend(_run_epubcheck(temporary))
-            os.replace(temporary, output)
+            durable_replace(temporary, output)
         finally:
             temporary.unlink(missing_ok=True)
     return warnings
