@@ -8,6 +8,7 @@ from PIL import Image
 
 from pdf2epub.ocr import (
     OCR_PROMPT,
+    OLLAMA_BOOK_MODELS,
     OLLAMA_FAST_MODEL,
     OLLAMA_QUALITY_MODEL,
     MistralDocumentOcrProvider,
@@ -16,6 +17,7 @@ from pdf2epub.ocr import (
     OllamaVisionOcrProvider,
     OpenAiCompatibleVisionOcrProvider,
     create_ocr_provider,
+    ollama_allowed_models,
     provider_names,
     provider_status,
 )
@@ -266,3 +268,148 @@ def test_provider_registry_drives_names_and_remote_status():
     statuses = {item["id"]: item for item in provider_status(settings)}
     assert statuses["mistral"]["ready"] is True
     assert statuses["mistral"]["remote"] is True
+
+
+# --- Ollama allowlist extension (PDF2EPUB_OLLAMA_EXTRA_MODELS) ---
+
+
+def test_ollama_allowed_models_unset_is_exactly_the_builtin_three():
+    assert ollama_allowed_models(OcrSettings()) == OLLAMA_BOOK_MODELS
+
+
+def test_ollama_allowed_models_appends_extras_order_preserving_and_deduped():
+    settings = OcrSettings(
+        ollama_extra_models=("qari-ocr:v0.3", OLLAMA_QUALITY_MODEL, "qari-ocr:v0.3")
+    )
+    assert ollama_allowed_models(settings) == (*OLLAMA_BOOK_MODELS, "qari-ocr:v0.3")
+
+
+def test_ollama_extra_model_accepted_by_factory_via_settings():
+    settings = OcrSettings(
+        ollama_base_url="http://localhost:11434",
+        ollama_model="qari-ocr:v0.3",
+        ollama_extra_models=("qari-ocr:v0.3",),
+    )
+    provider = create_ocr_provider("ollama", settings)
+    assert provider.model == "qari-ocr:v0.3"
+
+
+def test_ollama_extra_model_accepted_via_kwarg_override():
+    settings = OcrSettings(
+        ollama_base_url="http://localhost:11434",
+        ollama_extra_models=("qari-ocr:v0.3",),
+    )
+    provider = create_ocr_provider("ollama", settings, ollama_model="qari-ocr:v0.3")
+    assert provider.model == "qari-ocr:v0.3"
+
+
+def test_ollama_model_outside_allowlist_and_extras_is_rejected():
+    settings = OcrSettings(
+        ollama_base_url="http://localhost:11434",
+        ollama_model="some-thinking-model",
+    )
+    with pytest.raises(OcrConfigurationError):
+        create_ocr_provider("ollama", settings)
+
+
+def test_provider_status_unchanged_with_no_extra_config(monkeypatch):
+    """Pins provider_status() with no new env vars set — the default path."""
+    monkeypatch.setattr("pdf2epub.ocr.shutil.which", lambda name: None)
+    settings = OcrSettings(
+        ollama_base_url="",
+        ollama_model=OLLAMA_QUALITY_MODEL,
+        vision_base_url=None,
+        vision_model=None,
+        vision_api_key=None,
+        mistral_base_url="https://api.mistral.ai/v1",
+        mistral_model="mistral-ocr-latest",
+        mistral_api_key=None,
+    )
+    assert provider_status(settings) == [
+        {
+            "id": "tesseract",
+            "label": "Tesseract (local)",
+            "configured": False,
+            "ready": False,
+            "remote": False,
+            "detail": "Tesseract executable was not found",
+        },
+        {
+            "id": "ollama",
+            "label": f"Ollama — {OLLAMA_QUALITY_MODEL}",
+            "configured": False,
+            "ready": False,
+            "remote": False,
+            "detail": "Set the Ollama base URL and model, or install Ollama",
+            "model": OLLAMA_QUALITY_MODEL,
+            "book_models": list(OLLAMA_BOOK_MODELS),
+        },
+        {
+            "id": "openai_compatible",
+            "label": "Online vision model",
+            "configured": False,
+            "ready": False,
+            "remote": True,
+            "detail": (
+                "Online vision endpoint and model are required "
+                "(API key only if the endpoint needs one)"
+            ),
+        },
+        {
+            "id": "mistral",
+            "label": "Mistral Document OCR",
+            "configured": False,
+            "ready": False,
+            "remote": True,
+            "detail": "Set PDF2EPUB_MISTRAL_API_KEY to enable Mistral OCR",
+        },
+    ]
+
+
+# --- OpenAI-compatible provider: optional API key ---
+
+
+def test_openai_compatible_ready_without_api_key():
+    settings = OcrSettings(
+        vision_base_url="https://vision.example/v1",
+        vision_model="vision-model",
+        vision_api_key=None,
+    )
+    statuses = {item["id"]: item for item in provider_status(settings)}
+    assert statuses["openai_compatible"]["configured"] is True
+    assert statuses["openai_compatible"]["ready"] is True
+    assert statuses["openai_compatible"]["remote"] is True
+
+
+def test_openai_factory_accepts_keyless_configuration():
+    settings = OcrSettings(
+        vision_base_url="https://vision.example/v1",
+        vision_model="vision-model",
+        vision_api_key=None,
+    )
+    provider = create_ocr_provider("openai_compatible", settings)
+    assert provider.api_key is None
+
+
+@pytest.mark.parametrize(
+    ("api_key", "expect_header"),
+    [(None, False), ("secret", True)],
+)
+def test_openai_compatible_authorization_header_matches_key_presence(
+    monkeypatch, api_key, expect_header
+):
+    captured = {}
+
+    def fake_open(request, timeout):
+        captured["has_auth"] = "Authorization" in request.headers
+        captured["auth"] = request.headers.get("Authorization")
+        return FakeResponse({"choices": [{"message": {"content": "نص"}}]})
+
+    monkeypatch.setattr("pdf2epub.ocr.urllib.request.urlopen", fake_open)
+    provider = OpenAiCompatibleVisionOcrProvider(
+        "https://vision.example/v1", "vision-model", api_key
+    )
+    provider.recognize(image_bytes((100, 100)), "ara")
+    assert captured["has_auth"] is expect_header
+    if expect_header:
+        assert captured["auth"] == "Bearer secret"

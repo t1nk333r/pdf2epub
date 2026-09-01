@@ -46,6 +46,12 @@ SETTING_DEFINITIONS = (
         placeholder="8192",
     ),
     SettingDefinition(
+        "PDF2EPUB_OLLAMA_EXTRA_MODELS",
+        "نماذج Ollama إضافية",
+        "Ollama — محلي أو سحابي",
+        placeholder="model-a,model-b",
+    ),
+    SettingDefinition(
         "PDF2EPUB_MISTRAL_BASE_URL",
         "عنوان Mistral API",
         "Mistral Document OCR",

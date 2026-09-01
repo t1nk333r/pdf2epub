@@ -46,6 +46,21 @@ OLLAMA_BOOK_MODELS = (
 )
 
 
+def _parse_ollama_extra_models(raw: str | None) -> tuple[str, ...]:
+    """Parse PDF2EPUB_OLLAMA_EXTRA_MODELS into a stripped, deduped tuple.
+
+    Order-preserving; empty/whitespace-only entries are dropped.
+    """
+    if not raw:
+        return ()
+    names: list[str] = []
+    for item in raw.split(","):
+        name = item.strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 class OcrError(RuntimeError):
     """A provider could not complete OCR."""
 
@@ -92,6 +107,7 @@ class OcrSettings:
     ollama_model: str = OLLAMA_QUALITY_MODEL
     ollama_api_key: str | None = None
     ollama_num_ctx: int = 8192
+    ollama_extra_models: tuple[str, ...] = ()
     vision_base_url: str | None = None
     vision_model: str | None = None
     vision_api_key: str | None = None
@@ -125,6 +141,9 @@ class OcrSettings:
             or OLLAMA_QUALITY_MODEL,
             ollama_api_key=setting_value("PDF2EPUB_OLLAMA_API_KEY") or None,
             ollama_num_ctx=max(512, min(ollama_num_ctx, 16384)),
+            ollama_extra_models=_parse_ollama_extra_models(
+                setting_value("PDF2EPUB_OLLAMA_EXTRA_MODELS")
+            ),
             vision_base_url=(setting_value("PDF2EPUB_VISION_BASE_URL") or "").rstrip(
                 "/"
             )
@@ -140,6 +159,20 @@ class OcrSettings:
             mistral_api_key=setting_value("PDF2EPUB_MISTRAL_API_KEY") or None,
             timeout_seconds=max(300.0, min(timeout, 900.0)),
         )
+
+
+def ollama_allowed_models(settings: OcrSettings) -> tuple[str, ...]:
+    """The Ollama models the app will accept: the built-in three plus extras.
+
+    `PDF2EPUB_OLLAMA_EXTRA_MODELS` operator-supplied models are appended,
+    deduped against the built-ins, order-preserving. With no extras
+    configured this returns exactly `OLLAMA_BOOK_MODELS`.
+    """
+    allowed = list(OLLAMA_BOOK_MODELS)
+    for name in settings.ollama_extra_models:
+        if name not in allowed:
+            allowed.append(name)
+    return tuple(allowed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,13 +455,14 @@ class OpenAiCompatibleVisionOcrProvider:
 
     base_url: str
     model: str
-    api_key: str
+    api_key: str | None = None
     timeout: float = 300.0
     name: str = "openai_compatible"
     prompt: str = OCR_PROMPT
 
     def recognize(self, image_png: bytes, language: str) -> OcrResult:
         encoded = base64.b64encode(_prepare_vision_image(image_png)).decode("ascii")
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         data = _post_json(
             f"{self.base_url.rstrip('/')}/chat/completions",
             {
@@ -451,7 +485,7 @@ class OpenAiCompatibleVisionOcrProvider:
                     }
                 ],
             },
-            {"Authorization": f"Bearer {self.api_key}"},
+            headers,
             self.timeout,
         )
         try:
@@ -557,10 +591,12 @@ def _ollama_factory(settings: OcrSettings) -> OcrProvider:
         raise OcrConfigurationError(
             "Ollama requires PDF2EPUB_OLLAMA_BASE_URL and PDF2EPUB_OLLAMA_MODEL"
         )
-    if settings.ollama_model not in OLLAMA_BOOK_MODELS:
+    allowed_models = ollama_allowed_models(settings)
+    if settings.ollama_model not in allowed_models:
         raise OcrConfigurationError(
-            "Ollama OCR model must be an approved non-thinking model: "
-            + ", ".join(OLLAMA_BOOK_MODELS)
+            "Ollama OCR model must be an approved non-thinking model "
+            "(add extras via PDF2EPUB_OLLAMA_EXTRA_MODELS): "
+            + ", ".join(allowed_models)
         )
     return OllamaVisionOcrProvider(
         settings.ollama_base_url,
@@ -575,11 +611,14 @@ def _ollama_readiness(settings: OcrSettings) -> tuple[bool, bool, str]:
     configured = bool(settings.ollama_base_url and settings.ollama_model)
     if not configured:
         return False, False, "Set the Ollama base URL and model, or install Ollama"
-    if settings.ollama_model not in OLLAMA_BOOK_MODELS:
+    if settings.ollama_model not in ollama_allowed_models(settings):
         return (
             True,
             False,
-            f"Model {settings.ollama_model} is not an approved non-thinking OCR model",
+            (
+                f"Model {settings.ollama_model} is not an approved non-thinking "
+                "OCR model (add extras via PDF2EPUB_OLLAMA_EXTRA_MODELS)"
+            ),
         )
     headers = {"Accept": "application/json"}
     if settings.ollama_api_key:
@@ -616,12 +655,11 @@ def _ollama_readiness(settings: OcrSettings) -> tuple[bool, bool, str]:
 
 
 def _openai_factory(settings: OcrSettings) -> OcrProvider:
-    if not (
-        settings.vision_base_url and settings.vision_model and settings.vision_api_key
-    ):
+    if not (settings.vision_base_url and settings.vision_model):
         raise OcrConfigurationError(
-            "Online vision OCR requires PDF2EPUB_VISION_BASE_URL, "
-            "PDF2EPUB_VISION_MODEL, and PDF2EPUB_VISION_API_KEY"
+            "Online vision OCR requires PDF2EPUB_VISION_BASE_URL and "
+            "PDF2EPUB_VISION_MODEL (PDF2EPUB_VISION_API_KEY only if the "
+            "endpoint needs one)"
         )
     return OpenAiCompatibleVisionOcrProvider(
         settings.vision_base_url,
@@ -632,11 +670,16 @@ def _openai_factory(settings: OcrSettings) -> OcrProvider:
 
 
 def _openai_readiness(settings: OcrSettings) -> tuple[bool, bool, str]:
-    configured = bool(
-        settings.vision_base_url and settings.vision_model and settings.vision_api_key
-    )
+    configured = bool(settings.vision_base_url and settings.vision_model)
     if not configured:
-        return False, False, "Online vision endpoint, model, and API key are required"
+        return (
+            False,
+            False,
+            (
+                "Online vision endpoint and model are required (API key "
+                "only if the endpoint needs one)"
+            ),
+        )
     return (
         True,
         True,
@@ -737,7 +780,7 @@ def create_ocr_provider(
         raise OcrConfigurationError(f"Unknown OCR provider: {name}")
     provider = descriptor.factory(settings)
     if isinstance(provider, OllamaVisionOcrProvider) and ollama_model:
-        if ollama_model not in OLLAMA_BOOK_MODELS:
+        if ollama_model not in ollama_allowed_models(settings):
             raise OcrConfigurationError(f"Unsupported Ollama OCR model: {ollama_model}")
         provider.model = ollama_model
         if ollama_model != OLLAMA_QUALITY_MODEL:
@@ -763,6 +806,6 @@ def provider_status(settings: OcrSettings | None = None) -> list[dict]:
         }
         if descriptor.id == "ollama":
             status["model"] = settings.ollama_model
-            status["book_models"] = list(OLLAMA_BOOK_MODELS)
+            status["book_models"] = list(ollama_allowed_models(settings))
         statuses.append(status)
     return statuses

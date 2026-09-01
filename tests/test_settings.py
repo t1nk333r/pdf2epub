@@ -62,3 +62,18 @@ def test_secrets_are_never_returned(monkeypatch):
 def test_invalid_settings_are_rejected(key, value):
     with pytest.raises(ValueError):
         update_runtime_settings({key: value})
+
+
+def test_ollama_extra_models_unset_is_empty(monkeypatch):
+    monkeypatch.delenv("PDF2EPUB_OLLAMA_EXTRA_MODELS", raising=False)
+    assert OcrSettings.from_env().ollama_extra_models == ()
+
+
+def test_ollama_extra_models_parsed_stripped_and_deduped(monkeypatch):
+    monkeypatch.setenv(
+        "PDF2EPUB_OLLAMA_EXTRA_MODELS", " qari-ocr:v0.3 , , model-b,qari-ocr:v0.3 ,"
+    )
+    assert OcrSettings.from_env().ollama_extra_models == (
+        "qari-ocr:v0.3",
+        "model-b",
+    )

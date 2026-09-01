@@ -157,6 +157,11 @@ The per-book selector offers:
 - `qwen3-vl:30b-instruct-gpu` — fast
 - `qwen3.8:27b-q4_K_M` — lower-VRAM alternative
 
+Set `PDF2EPUB_OLLAMA_EXTRA_MODELS` to a comma-separated list to accept
+additional pulled models (via CLI `--ollama-model` or the API) beyond these
+three — only add instruct/OCR models, since thinking models emit `<think>`
+blocks that corrupt OCR output.
+
 Each page is resized to a grayscale 1280 px JPEG and sent in its own stateless
 `/api/chat` request. The adapter uses an 8K context (up to 16K only for Qwen3.8),
 disables thinking, serializes requests, and retries HTTP 5xx/connection resets.
@@ -166,7 +171,7 @@ are written to the live log and quality report.
 
 ### Hosted OpenAI-compatible vision APIs
 
-This adapter works with online model services exposing the `POST /chat/completions` vision schema:
+This adapter works with online model services exposing the `POST /chat/completions` vision schema. `PDF2EPUB_VISION_API_KEY` is optional — omit it for a local server (e.g. vLLM) that does not require one; when set, it is sent as an `Authorization: Bearer` header.
 
 ```bash
 export PDF2EPUB_VISION_BASE_URL=https://provider.example/v1

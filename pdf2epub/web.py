@@ -30,9 +30,9 @@ from .checkpoints import (
 )
 from .models import ConversionOptions, JobState, require_transition
 from .ocr import (
-    OLLAMA_BOOK_MODELS,
     OLLAMA_QUALITY_MODEL,
     OcrSettings,
+    ollama_allowed_models,
     provider_descriptor,
     provider_names,
     provider_status,
@@ -610,7 +610,9 @@ def create_job(
         raise HTTPException(400, "Invalid mode")
     if ocr_provider not in provider_names():
         raise HTTPException(400, "Invalid OCR provider")
-    if ocr_provider == "ollama" and ollama_model not in OLLAMA_BOOK_MODELS:
+    if ocr_provider == "ollama" and ollama_model not in ollama_allowed_models(
+        OcrSettings.from_env()
+    ):
         raise HTTPException(400, "Invalid Ollama OCR model")
     descriptor = provider_descriptor(ocr_provider)
     if descriptor and descriptor.remote and not remote_acknowledged:
