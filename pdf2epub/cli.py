@@ -6,7 +6,12 @@ from pathlib import Path
 
 from .analyzer import MissingDependency
 from .models import ConversionOptions
-from .ocr import OLLAMA_BOOK_MODELS, OLLAMA_QUALITY_MODEL, provider_names
+from .ocr import (
+    OLLAMA_QUALITY_MODEL,
+    OcrSettings,
+    ollama_allowed_models,
+    provider_names,
+)
 from .pipeline import ConversionIntegrityError, ConversionPublicationError, convert
 
 
@@ -34,7 +39,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--ollama-model",
-        choices=OLLAMA_BOOK_MODELS,
+        choices=ollama_allowed_models(OcrSettings.from_env()),
         default=OLLAMA_QUALITY_MODEL,
     )
     args = parser.parse_args()
