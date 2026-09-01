@@ -1,4 +1,9 @@
-from pdf2epub.text import evaluate_text, normalize_arabic, wrap_ltr
+from pdf2epub.text import (
+    dropped_character_findings,
+    evaluate_text,
+    normalize_arabic,
+    wrap_ltr,
+)
 
 
 def test_clean_arabic_scores_high():
@@ -107,3 +112,48 @@ def test_plain_lam_alef_transposition_is_detected():
     assert "reversed lam-alef ligatures" not in evaluate_text(
         "الانتخاب الطبيعي في العالم الحي"
     ).reasons
+
+
+_FILLER = "هذا نص عربي سليم لاختبار جودة استخراج الكلمات من ملف الكتاب المطبوع. " * 3
+
+
+def test_dropped_character_is_reported_with_both_forms():
+    embedded = _FILLER + "كان الانحياز للتخندق الفكري واضحا."
+    ocr = _FILLER + "كان الانحياز للخندق الفكري واضحا."
+    assert dropped_character_findings(embedded, ocr) == [("للتخندق", "للخندق")]
+
+
+def test_dropped_character_hint_reports_known_orthographic_variants():
+    # "سلفا"/"سلف" is a tanween-alef spelling variant, not an OCR error.
+    # Measured precision is ~50% precisely because such pairs are reported.
+    # That is accepted behavior: this is a review hint, and any noise filter
+    # must be re-measured on a real conversion before it is added. Do not
+    # "fix" this test by filtering.
+    embedded = _FILLER + "قلنا ذلك سلفا في الفصل الأول."
+    ocr = _FILLER + "قلنا ذلك سلف في الفصل الأول."
+    assert dropped_character_findings(embedded, ocr) == [("سلفا", "سلف")]
+
+
+def test_dropped_character_check_skips_short_pages():
+    # Below MIN_COMPARABLE_TEXT the comparison means nothing, same as the
+    # coverage gate.
+    assert dropped_character_findings("للتخندق", "للخندق") == []
+
+
+def test_dropped_character_check_ignores_words_shorter_than_four_letters():
+    embedded = _FILLER + "زرع فيه الأمل."
+    ocr = _FILLER + "زع فيه الأمل."
+    assert dropped_character_findings(embedded, ocr) == []
+
+
+def test_dropped_character_check_requires_exactly_one_missing_character():
+    # "اعتر" is "اعتراف" minus two characters; only exactly-one drops are
+    # reported — this constraint is what keeps the list reviewable.
+    embedded = _FILLER + "تحدث عن اعتراف الشهود."
+    ocr = _FILLER + "تحدث عن اعتر الشهود."
+    assert dropped_character_findings(embedded, ocr) == []
+
+
+def test_dropped_character_check_is_silent_on_identical_texts():
+    embedded = _FILLER + "كان الانحياز للتخندق الفكري واضحا."
+    assert dropped_character_findings(embedded, embedded) == []
