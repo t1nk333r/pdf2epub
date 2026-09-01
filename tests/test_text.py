@@ -2,6 +2,7 @@ from pdf2epub.text import (
     dropped_character_findings,
     evaluate_text,
     normalize_arabic,
+    numeral_mismatches,
     wrap_ltr,
 )
 
@@ -184,3 +185,39 @@ def test_genuine_truncation_is_still_refused():
     embedded = "هذه فقرة كاملة من نص الكتاب تحتوي على كلمات كثيرة ومفيدة جدا. " * 6
     truncated = "هذه فقرة كاملة من نص الكتاب"
     assert not ocr_covers_embedded(embedded, truncated)
+
+
+def test_numeral_mismatch_reports_different_values():
+    # The measured page-18 failure: embedded 73, OCR read ٩٣.
+    embedded = _FILLER + "انظر صفحة 73 وطبعة عام 1985."
+    ocr = _FILLER + "انظر صفحة ٩٣ وطبعة عام ١٩٨٥."
+    assert numeral_mismatches(embedded, ocr) == (["73"], ["93"])
+
+
+def test_numeral_mismatch_ignores_digit_system_differences():
+    embedded = _FILLER + "في عام ١٤٠٥ هجرية."
+    ocr = _FILLER + "في عام 1405 هجرية."
+    assert numeral_mismatches(embedded, ocr) == ([], [])
+
+
+def test_numeral_mismatch_identical_numbers_cancel():
+    embedded = _FILLER + "الباب 3 والفصل 12."
+    ocr = _FILLER + "الباب 3 والفصل 12."
+    assert numeral_mismatches(embedded, ocr) == ([], [])
+
+
+def test_numeral_mismatch_reports_omitted_contents_numbers():
+    # A contents entry whose destination number OCR omitted.
+    embedded = _FILLER + "المقدمة 9 الفصل الأول 15"
+    ocr = _FILLER + "المقدمة 9 الفصل الأول"
+    assert numeral_mismatches(embedded, ocr) == (["15"], [])
+
+
+def test_numeral_mismatch_requires_comparable_text():
+    assert numeral_mismatches("صفحة 73", "صفحة 93") == ([], [])
+
+
+def test_numeral_mismatch_normalizes_persian_digits():
+    embedded = _FILLER + "طبع سنة ۱۳۶۲ شمسية."
+    ocr = _FILLER + "طبع سنة 1362 شمسية."
+    assert numeral_mismatches(embedded, ocr) == ([], [])

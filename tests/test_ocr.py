@@ -88,6 +88,24 @@ def test_ollama_sends_native_vision_request(monkeypatch):
     assert result.duration_seconds == 2.5
 
 
+def test_ollama_prompt_override_is_sent(monkeypatch):
+    captured = {}
+
+    def fake_open(request, timeout):
+        captured["body"] = json.loads(request.data)
+        return FakeResponse({"message": {"content": "نص"}})
+
+    monkeypatch.setattr("pdf2epub.ocr.urllib.request.urlopen", fake_open)
+    provider = OllamaVisionOcrProvider(
+        "http://localhost:11434", OLLAMA_QUALITY_MODEL, prompt="PROBE PROMPT"
+    )
+    provider.recognize(image_bytes((100, 100)), "ara")
+    assert captured["body"]["messages"][0] == {
+        "role": "system",
+        "content": "PROBE PROMPT",
+    }
+
+
 def test_ollama_retries_5xx_then_succeeds(monkeypatch):
     calls = 0
     sleeps = []
@@ -184,6 +202,24 @@ def test_openai_compatible_sends_data_url(monkeypatch):
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert captured["auth"] == "Bearer secret"
     assert result.text == "نص"
+
+
+def test_openai_prompt_override_is_sent(monkeypatch):
+    captured = {}
+
+    def fake_open(request, timeout):
+        captured["body"] = json.loads(request.data)
+        return FakeResponse({"choices": [{"message": {"content": "نص"}}]})
+
+    monkeypatch.setattr("pdf2epub.ocr.urllib.request.urlopen", fake_open)
+    provider = OpenAiCompatibleVisionOcrProvider(
+        "https://vision.example/v1", "vision-model", "secret", prompt="PROBE PROMPT"
+    )
+    provider.recognize(image_bytes((100, 100)), "ara")
+    assert captured["body"]["messages"][0] == {
+        "role": "system",
+        "content": "PROBE PROMPT",
+    }
 
 
 def test_hosted_provider_requires_server_configuration():

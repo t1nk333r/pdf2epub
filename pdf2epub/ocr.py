@@ -307,6 +307,7 @@ class OllamaVisionOcrProvider:
     fallback_model: str | None = None
     page_lengths: list[int] = field(default_factory=list)
     name: str = "ollama"
+    prompt: str = OCR_PROMPT
 
     def _request_model(self, model: str, encoded: str) -> tuple[str, dict]:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -324,7 +325,7 @@ class OllamaVisionOcrProvider:
                         "stream": False,
                         "think": False,
                         "messages": [
-                            {"role": "system", "content": OCR_PROMPT},
+                            {"role": "system", "content": self.prompt},
                             {
                                 "role": "user",
                                 "content": "استخرج نص هذه الصفحة.",
@@ -424,6 +425,7 @@ class OpenAiCompatibleVisionOcrProvider:
     api_key: str
     timeout: float = 300.0
     name: str = "openai_compatible"
+    prompt: str = OCR_PROMPT
 
     def recognize(self, image_png: bytes, language: str) -> OcrResult:
         encoded = base64.b64encode(_prepare_vision_image(image_png)).decode("ascii")
@@ -435,7 +437,7 @@ class OpenAiCompatibleVisionOcrProvider:
                 "max_tokens": 3000,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "messages": [
-                    {"role": "system", "content": OCR_PROMPT},
+                    {"role": "system", "content": self.prompt},
                     {
                         "role": "user",
                         "content": [
