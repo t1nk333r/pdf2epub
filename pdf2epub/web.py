@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .checkpoints import (
+    MAX_JOB_LOGS,
     CheckpointError,
     CheckpointStore,
     ConversionControl,
@@ -57,7 +58,6 @@ JOB_ROOT = (
     / "jobs"
 )
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
-MAX_JOB_LOGS = 2_000
 
 
 @dataclass
