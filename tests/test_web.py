@@ -33,6 +33,23 @@ def client():
         yield test_client
 
 
+def test_client_lifespan_does_not_touch_the_default_store(tmp_path, monkeypatch):
+    decoy = tmp_path / "decoy-jobs"
+    decoy.mkdir()
+    (decoy / ("a" * 32)).mkdir()
+    monkeypatch.setattr(web, "JOB_ROOT", decoy)
+    # the autouse fixture already re-pointed JOB_ROOT for this test; this
+    # test then points it at a decoy explicitly and confirms recovery scans
+    # only what a test sets, never a hardcoded real path
+    with TestClient(web.app):
+        pass
+    assert set(web.jobs) == set()  # decoy dir has no valid manifest -> skipped
+
+
+def test_default_job_root_is_never_the_real_one_during_tests():
+    assert not str(web.JOB_ROOT).startswith(str(Path.home() / ".local"))
+
+
 def test_quality_summary_omits_large_page_details():
     report = {
         "pages": 341,
