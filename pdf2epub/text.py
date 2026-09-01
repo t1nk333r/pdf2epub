@@ -72,6 +72,46 @@ def ocr_covers_embedded(embedded: str, ocr: str) -> bool:
     return word_overlap(embedded, ocr) >= MIN_WORD_OVERLAP
 
 
+# A word must be at least this long before its one-character-shorter form is
+# specific enough to mean anything: three-letter words shrink into two-letter
+# particles that occur on every page. None of the 32 candidates measured on a
+# real conversion involved an embedded word shorter than four characters.
+MIN_DROPPED_CHAR_WORD_LENGTH = 4
+
+
+def dropped_character_findings(embedded: str, ocr: str) -> list[tuple[str, str]]:
+    """Embedded words that reappear in the OCR text minus exactly one character.
+
+    OCR sometimes drops a single letter and produces a real word with a
+    different meaning ("للتخندق" read as "للخندق"), which neither a quality
+    score nor the bulk-loss gate `ocr_covers_embedded` can see. This
+    cross-check is a review hint only: measured precision is roughly 50%
+    (tanween-alef spelling variants such as "سلفا"/"سلف" look identical to
+    real drops), so callers must report the pairs, never auto-correct with
+    them. The exactly-one-character constraint is what keeps the list short
+    (~3 per page on a measured conversion); a plain word diff drowns in the
+    embedded layer's own ligature damage (30+ items per page).
+    """
+    if len(embedded.strip()) < MIN_COMPARABLE_TEXT:
+        return []
+    embedded_words = {
+        word
+        for word in WORD_RE.findall(normalize_arabic(embedded))
+        if len(word) >= MIN_DROPPED_CHAR_WORD_LENGTH
+    }
+    ocr_words = {
+        word for word in WORD_RE.findall(normalize_arabic(ocr)) if len(word) > 1
+    }
+    findings: list[tuple[str, str]] = []
+    for word in sorted(embedded_words - ocr_words):
+        for position in range(len(word)):
+            shorter = word[:position] + word[position + 1 :]
+            if shorter in ocr_words:
+                findings.append((word, shorter))
+                break
+    return findings
+
+
 def evaluate_text(text: str) -> TextQuality:
     visible = [c for c in text if not c.isspace()]
     if not visible:
