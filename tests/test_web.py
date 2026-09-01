@@ -227,9 +227,9 @@ def test_home_contains_settings_dialog(client):
     assert "new URLSearchParams(location.search)" in response.text
     assert "localStorage.getItem('pdf2epub-active-job')" in response.text
     assert "typeof detail==='object'&&detail?detail.message" in response.text
-    assert "act('إيقاف مؤقت','pause')" in response.text
-    assert "act('متابعة','resume')" in response.text
-    assert "act('إعادة تشغيل','restart')" in response.text
+    assert "'pause')" in response.text
+    assert "'resume')" in response.text
+    assert "'restart')" in response.text
     assert 'class="layout"' in response.text
     assert 'class="col-side"' in response.text
     assert 'id="retry"' in response.text
@@ -901,10 +901,25 @@ def test_home_has_job_delete_controls(client):
     assert "'/api/jobs/'+job.id,{method:'DELETE'}" in body
 
 
-def test_provider_option_labels_isolate_the_latin_engine_name(client):
-    # Engine names are Latin, their qualifiers Arabic. Without a bidi isolate
-    # the runs reorder inside the RTL <select> and the name is torn away from
-    # its status. U+2068/U+2069 keep the name atomic.
+def test_provider_option_labels_are_direction_safe(client):
+    # Engine names are Latin, their qualifiers Arabic. In the RTL build the
+    # qualifier must come first so the line reads correctly right-to-left, and
+    # the Latin name is wrapped in U+2068/U+2069 so it stays atomic. The
+    # English build is all-Latin and needs neither.
     body = client.get("/").text
-    assert "\\u2068" in body and "\\u2069" in body
-    assert "'\\u2068'+provider.label+'\\u2069'" in body
+    assert "\\u2068'+provider.label+'\\u2069" in body
+    assert "LANG==='en'?provider.label" in body
+
+
+def test_ui_exposes_an_english_language_mode(client):
+    body = client.get("/").text
+    assert 'id="lang-toggle"' in body
+    assert "pdf2epub-lang" in body
+    assert "function applyLang()" in body
+    # every key referenced by markup must exist in the English table
+    import re
+
+    keys = set(re.findall(r'data-i18n(?:-title|-aria)?="([\w.]+)"', body))
+    english = set(re.findall(r"'([\w.]+)':'", body))
+    missing = sorted(keys - english)
+    assert not missing, f"markup keys with no English string: {missing}"
