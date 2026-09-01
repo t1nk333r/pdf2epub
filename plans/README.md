@@ -31,6 +31,13 @@ for that.
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
 | 12 | Flag likely dropped characters in OCR output | P2 | M | — | DONE — `advisor/exec-12` (`6790031`, `4acb0c5`), reviewed 2026-09-01; merged |
 | 13 | Tune the OCR prompt behind a benchmark | P2 | L | — | PARTIAL — steps 1–6 merged (`advisor/exec-13`); step 7 (measurement) needs a corpus and a GPU |
+| 14 | Isolate the test suite from the real job store | P1 | S | — | TODO — **execute first**; reproduced data-touch risk |
+| 15 | Fsync the published EPUB and report | P1 | S | 14* | TODO |
+| 16 | Bound and cache the quality-report reads | P2 | S | 14* | TODO |
+| 17 | Cover the uncovered selection branches | P2 | M | 14* | TODO — prerequisite for the selection-policy extraction |
+| 18 | Close the small audit gaps (6 one-liners) | P2 | S | 14* | TODO |
+| 19 | Unblock local model experimentation | P3 | S/M | 14* | TODO |
+| 20 | Flag same-length word substitutions | P3 | M | 14* | TODO — Step 0 measurement gate may REJECT it |
 
 Status values for active plans: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, or
 `REJECTED`. Historical plans predate this index and are not execution tasks.
@@ -545,3 +552,59 @@ executes step 8 must change the sentinel in the same commit.**
 The harness self-validates offline: it REJECTs a deliberately worse prompt and
 ACCEPTs the reverse, so the decision rule demonstrably distinguishes better
 from worse before it is ever pointed at real data.
+
+
+## Deep audit — 2026-09-01 (`63bbceb`), full repo
+
+Five parallel read-only auditors (correctness, security, performance, tests,
+debt/deps/docs) plus advisor-run DX and direction. Every tabled finding was
+vetted against the code by the reviewer; the top finding was independently
+reproduced. Full findings table lives in the session record; dispositions:
+
+**Planned**: test-suite/real-store leak (→14, reproduced: a real job loaded
+into `web.jobs` from the fixture's lifespan); EPUB/report published without
+fsync — fsync counts 5/0/0 across checkpoints/pipeline/epub (→15); unbounded
++ uncached report reads at `web.py:338,934`, plus `document.report()` rebuilt
+2–3×/conversion (→16); four selection branches with zero coverage (→17);
+pydantic undeclared, README Docker port 11434-vs-11435, JS `messages` missing
+`queued` + untranslated `stateLabels`, CLI raw tracebacks (reconfirms
+2026-08-28 #7), duplicated `MAX_JOB_LOGS`, `spaced_arabic` narrower than
+`ARABIC_RE` (→18); hardcoded Ollama allowlist + mandatory API key for local
+endpoints (→19); same-length substitutions `القيوم→القائم` /
+`الصفرية→الصغيرة` invisible to every detector — verified: drops-detector ∅,
+overlap 0.94 (→20).
+
+**Recorded, unplanned**: contract-test import fragility under
+`--import-mode=importlib` (reproduced by auditor); Tesseract provider —
+the default engine — wholly untested; EPUBCheck failure/timeout paths and 6/7
+`_validate_internal` branches untested; Ollama model list duplicated in the
+JS dropdown (TECHDEBT-01); benchmark render helper duplicates the analyzer's;
+no-lockfile reconfirmed with live drift (fastapi floor 0.115 → resolved
+0.141.1; Jenkins is a second unpinned resolver); README omissions (UI
+features, benchmarks/); Jenkins health-check wording; no CLAUDE.md; stale
+venv shebangs / cwd-dependent imports (the papercut every plan since 04
+carries a workaround for).
+
+**LOW-confidence tail (investigate)**: LTR-island regex swallowing a
+paragraph-internal newline; unguarded `statistics.mean` in poetry detection;
+`BlockType.LIST` rendered as plain paragraph; stub-merge O(k²) concat;
+`_reading_order` O(n²) partition; duplicate `get_image_rects`; sync SHA-256
+on the resume/restart request thread; transition table not tested as data;
+CLI flags beyond `--allow-partial` untested.
+
+**Downgraded on vetting**: the manifest read-modify-write race — worker and
+request threads share ONE manifest object, so field-level lost updates cannot
+occur; residual risk is a torn multi-field snapshot during an unlocked
+`write_manifest`. Documented-invariant material, not locking work.
+
+**Confirmed clean**: checkpoint durability and pause/resume lifecycle (best-
+tested subsystems); filename/download/symlink/secret handling; no XSS path in
+the embedded JS; `.env` never committed and excluded from the Docker context;
+resource handling leak-free; `.env.example` ↔ `settings.py` in perfect sync;
+`plans/README.md` accurate at HEAD. `pip-audit` not run (no network in the
+audit sandbox) — worth running manually.
+
+**Execution order**: 14 strictly first (every executor runs the suite; until
+14 lands that suite can rewrite real job manifests). 15–18 in any order after;
+19 before any model-comparison work; 20 gated on its own Step 0 measurement.
+The starred dependency on 14 is operational, not code-level.
