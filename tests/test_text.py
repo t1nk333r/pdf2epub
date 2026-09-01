@@ -18,6 +18,11 @@ def test_disconnected_arabic_is_rejected():
     assert quality.score < 0.48
 
 
+def test_disconnected_extended_arabic_is_detected():
+    quality = evaluate_text("ݐ ݑ ݒ ݓ ݔ " * 3)
+    assert "disconnected Arabic letters" in quality.reasons
+
+
 def test_reversed_heading_is_suspicious():
     quality = evaluate_text("لوألا لصفلا\nميلس يبرع صن اذه " * 4)
     assert "probable visual-order/reversed Arabic" in quality.reasons
