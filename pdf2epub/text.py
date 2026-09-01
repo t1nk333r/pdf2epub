@@ -6,7 +6,11 @@ from collections import Counter
 
 from .models import TextQuality
 
-ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]")
+ARABIC_CLASS = r"\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff"
+ARABIC_RE = re.compile(f"[{ARABIC_CLASS}]")
+SPACED_ARABIC_RE = re.compile(
+    rf"(?:[{ARABIC_CLASS}]\s){{4,}}[{ARABIC_CLASS}]"
+)
 WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 HEADING_RE = re.compile(
     r"^(?:الفصل|الباب|الجزء|المقدمة|التمهيد|الخاتمة|المبحث|المطلب)(?:\s|$)"
@@ -174,7 +178,7 @@ def evaluate_text(text: str) -> TextQuality:
         for c in visible
     )
     unexpected_symbol_ratio = unexpected_symbols / len(visible)
-    spaced_arabic = bool(re.search(r"(?:[\u0600-\u06ff]\s){4,}[\u0600-\u06ff]", text))
+    spaced_arabic = bool(SPACED_ARABIC_RE.search(text))
     reversed_ligatures = len(REVERSED_LIGATURE_RE.findall(text))
     probable_visual_order = any(
         HEADING_RE.match(line[::-1].strip())

@@ -129,6 +129,30 @@ def test_cli_exposes_allow_partial(monkeypatch, tmp_path):
     assert captured["options"].allow_partial is False
 
 
+def test_cli_reports_integrity_failures_without_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    from pdf2epub import cli
+    from pdf2epub.pipeline import ConversionIntegrityError
+
+    report_path = tmp_path / "quality-report.json"
+
+    def _raise(*args, **kwargs):
+        raise ConversionIntegrityError([1, 2], report_path, "unreadable pages")
+
+    monkeypatch.setattr(cli, "convert", _raise)
+    monkeypatch.setattr(
+        "sys.argv", ["pdf2epub", str(tmp_path / "book.pdf")]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "unreadable pages" in captured.err
+    assert str(report_path) in captured.err
+
+
 def test_contents_lines_do_not_become_chapter_headings():
     from pdf2epub.analyzer import _classify_structure
     from pdf2epub.models import ConversionOptions

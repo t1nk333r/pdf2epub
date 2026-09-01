@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+from .analyzer import MissingDependency
 from .models import ConversionOptions
 from .ocr import OLLAMA_BOOK_MODELS, OLLAMA_QUALITY_MODEL, provider_names
-from .pipeline import convert
+from .pipeline import ConversionIntegrityError, ConversionPublicationError, convert
 
 
 def main() -> None:
@@ -44,14 +46,23 @@ def main() -> None:
         ollama_model=args.ollama_model if args.ocr_provider == "ollama" else None,
         allow_partial=args.allow_partial,
     )
-    outputs = convert(
-        args.pdf,
-        args.output,
-        options,
-        lambda stage, done, total: print(
-            f"\r{stage}: {done}/{total}", end="", flush=True
-        ),
-    )
+    try:
+        outputs = convert(
+            args.pdf,
+            args.output,
+            options,
+            lambda stage, done, total: print(
+                f"\r{stage}: {done}/{total}", end="", flush=True
+            ),
+        )
+    except (ConversionIntegrityError, ConversionPublicationError) as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        if getattr(exc, "report_path", None):
+            print(f"report: {exc.report_path}", file=sys.stderr)
+        raise SystemExit(2)
+    except MissingDependency as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        raise SystemExit(3)
     print()
     for kind, path in outputs.items():
         print(f"{kind}: {path}")

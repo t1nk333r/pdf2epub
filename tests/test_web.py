@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -8,7 +9,7 @@ import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
-from pdf2epub import pipeline, web
+from pdf2epub import checkpoints, pipeline, web
 from pdf2epub.checkpoints import (
     MAX_CHECKPOINT_BYTES,
     CheckpointStore,
@@ -322,6 +323,20 @@ def test_home_contains_settings_dialog(client):
     assert 'id="retry"' in response.text
 
 
+def test_js_state_maps_cover_every_job_state():
+    labels_match = re.search(r"stateLabelsAr=\{([^}]*)\}", web.INDEX_HTML)
+    messages_match = re.search(
+        r"const messages=\{([^}]*)\};message\.textContent", web.INDEX_HTML
+    )
+    assert labels_match is not None
+    assert messages_match is not None
+    label_keys = set(re.findall(r"(\w+):", labels_match.group(1)))
+    message_keys = set(re.findall(r"(\w+):", messages_match.group(1)))
+    expected = {state.value for state in JobState}
+    assert label_keys == expected
+    assert message_keys == expected
+
+
 def test_job_logs_are_structured_bounded_and_public(monkeypatch):
     monkeypatch.setattr(web, "MAX_JOB_LOGS", 2)
     job = Job("b" * 32)
@@ -334,6 +349,32 @@ def test_job_logs_are_structured_bounded_and_public(monkeypatch):
     assert [entry["id"] for entry in public["logs"]] == [2, 3]
     assert public["logs"][-1]["level"] == "success"
     assert public["logs"][-1]["message"] == "Finished"
+
+
+def test_persisted_manifest_logs_are_truncated_to_the_shared_limit(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(checkpoints, "MAX_JOB_LOGS", 3)
+    options = ConversionOptions()
+    store = CheckpointStore(tmp_path / "jobs", "d" * 32)
+    store.initialize()
+    manifest = JobManifest(
+        id="d" * 32,
+        filename="book.pdf",
+        source_sha256="0" * 64,
+        source_size=1,
+        page_count=1,
+        state=JobState.PROCESSING,
+        stage="Analyzing",
+        options=asdict(options),
+        contract="c",
+        provider_id="tesseract",
+        logs=[{"id": i, "level": "info", "message": str(i)} for i in range(5)],
+    )
+    store.write_manifest(manifest)
+    loaded = store.load_manifest()
+    assert len(loaded.logs) == checkpoints.MAX_JOB_LOGS
+    assert [entry["id"] for entry in loaded.logs] == [2, 3, 4]
 
 
 def test_progress_updates_append_log_event():

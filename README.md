@@ -111,7 +111,9 @@ durable jobs and checkpoints under `/data` in the `pdf2epub_data` volume. Set `P
 if port 8000 is already used; this Compose-only value cannot be changed from the
 web settings panel because it controls the listener before the app starts.
 
-Inside Docker, the default Ollama URL is `http://host.docker.internal:11434`.
+Inside Docker, the default Ollama URL is `http://host.docker.internal:11435`.
+Override it by setting `PDF2EPUB_OLLAMA_URL_DOCKER` in `.env`, which Compose
+maps to `PDF2EPUB_OLLAMA_BASE_URL` inside the container.
 On Linux/Omarchy, Ollama must listen on an address reachable by Docker rather
 than only `127.0.0.1`. API keys entered through the cog are intentionally lost
 when the container restarts; put persistent secrets in the local `.env` file,
