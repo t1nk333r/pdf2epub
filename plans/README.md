@@ -29,6 +29,7 @@ for that.
 | 09 | Verify Qur'anic quotations against a reference text | P3 | M | — | BLOCKED — Step 0 cannot be measured; no corpus available |
 | 10 | Guard the destructive job endpoints and restore loopback binding | P1 | S | — | DONE — `advisor/exec-10` (`d0ca2ab`), reviewed 2026-08-31; 119 pass |
 | 11 | Keep navigation entries for merged chapters | P2 | S | — | DONE — `advisor/exec-11` (`3165649`), reviewed 2026-08-31; 121 pass, EPUBCheck clean |
+| 12 | Flag likely dropped characters in OCR output | P2 | M | — | DONE — `advisor/exec-12` (`6790031`, `4acb0c5`), reviewed 2026-09-01; merged |
 
 Status values for active plans: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED`, or
 `REJECTED`. Historical plans predate this index and are not execution tasks.
@@ -465,3 +466,42 @@ no longer wanted.
   the same corpus that unblocks plan 09 would settle it.
 - **Audit findings #5, #7, #8, #9** — recorded in the audit table above, not
   planned.
+
+
+## Plan 12 — 2026-09-01
+
+Written by a Fable subagent, executed by Sonnet, reviewed and merged.
+Suite: **140 passing**, ruff clean.
+
+Origin: an operator-reported miss. On page 15 of a real conversion the embedded
+layer held `للتخندق` (correct) while the selected OCR read had `للخندق` — a
+different word. The correct reading was in the candidate that lost.
+
+`ocr_covers_embedded` cannot catch this and is not meant to: it is a bulk-loss
+gate (length ratio + 50% word overlap). A one-character drop is invisible to it.
+
+Measured before planning, on a real 20-page conversion:
+
+- 32 dropped-character candidates across 10 comparable pages — **3.2 per page**.
+- True positives include `للتخندق→للخندق`, `النصوص→الصوص` (texts→thieves),
+  `التنوع→النوع` (diversity→type), `يخاطب→يخطب` (addresses→preaches).
+- **Precision ~50%** — tanween-alef variants (`سلفا→سلف`) are indistinguishable
+  from real drops. Hence: review hint, never a correction.
+- A plain word diff does **not** work: 30+ items per page, drowned in the
+  embedded layer's own mid-word ligature damage. The one-character constraint
+  is what makes the signal usable.
+
+Three invariants held and verified on the merged tree: the text is never
+modified, `integrity` is built solely from `PageSelection` so a hint cannot
+block publication, and `ocr_covers_embedded` / `choose_ocr` are byte-identical.
+
+**This plan was the best-specified of the session, and the difference was
+method**: its author ran every verification command before writing it down. Its
+Step 2 probe was confirmed to return `[('للتخندق', 'للخندق')]` against a real
+implementation before an executor ever saw it, and its `-k` filter was checked
+to match the tests it specifies. The one defect found was drift, not error —
+15 stale test counts after an unrelated commit shifted the baseline 132→133.
+
+One test deliberately pins a known false positive (`سلفا→سلف`) rather than
+hiding it. Keep that when tuning: if the noise is ever filtered, that test
+should be updated to document the new behaviour, not deleted.
