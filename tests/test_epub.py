@@ -1,6 +1,7 @@
 import re
 import zipfile
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 from PIL import Image
@@ -154,6 +155,67 @@ def test_semantic_headings_footnotes_and_rtl_body(tmp_path):
         assert "<h2>المبحث</h2>" in chapters
         assert '<a epub:type="noteref" href="#fn-1-1">1</a>' in chapters
         assert 'epub:type="footnote" class="footnote" id="fn-1-1"' in chapters
+
+
+def test_unnumbered_footnotes_preserve_text_without_duplicate_targets(tmp_path):
+    document = DocumentResult(
+        "كتاب",
+        pages=[
+            PageResult(
+                number,
+                PageType.TEXT,
+                "embedded_text",
+                600,
+                800,
+                blocks=[
+                    Block(BlockType.PARAGRAPH, "متن الحاشية [^note]"),
+                    Block(BlockType.FOOTNOTE, f"حاشية أولى في الصفحة {number}"),
+                    Block(BlockType.FOOTNOTE, f"حاشية ثانية في الصفحة {number}"),
+                    Block(BlockType.FOOTNOTE, "حاشية مرقمة", footnote_id="note"),
+                ],
+            )
+            for number in (1, 2)
+        ],
+    )
+    output = tmp_path / "footnotes.epub"
+    build_epub(document, output, validate=False)
+    namespace = {"xhtml": "http://www.w3.org/1999/xhtml"}
+    with zipfile.ZipFile(output) as archive:
+        chapter = ElementTree.fromstring(
+            archive.read("EPUB/chapters/chapter-001.xhtml")
+        )
+    ids = [element.get("id") for element in chapter.iter() if element.get("id")]
+    assert len(ids) == len(set(ids))
+    notes = chapter.findall(".//xhtml:aside", namespace)
+    assert len(notes) == 6
+    for number in (1, 2):
+        assert any(note.text == f"حاشية أولى في الصفحة {number}" for note in notes)
+        assert any(note.text == f"حاشية ثانية في الصفحة {number}" for note in notes)
+    for reference in chapter.findall(".//xhtml:a", namespace):
+        assert reference.get("href").removeprefix("#") in ids
+
+
+def test_duplicate_explicit_footnote_ids_prevent_publication(tmp_path):
+    document = DocumentResult(
+        "كتاب",
+        pages=[
+            PageResult(
+                1,
+                PageType.TEXT,
+                "embedded_text",
+                600,
+                800,
+                blocks=[
+                    Block(BlockType.FOOTNOTE, "حاشية أولى", footnote_id="1"),
+                    Block(BlockType.FOOTNOTE, "حاشية ثانية", footnote_id="1"),
+                ],
+            )
+        ],
+    )
+    output = tmp_path / "invalid.epub"
+    with pytest.raises(EpubValidationError, match="duplicate ID: fn-1-1"):
+        build_epub(document, output, validate=False)
+    assert not output.exists()
 
 
 def test_invalid_image_prevents_epub_publication(tmp_path):

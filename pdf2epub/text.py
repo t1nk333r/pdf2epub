@@ -72,20 +72,23 @@ def _comparable_length(text: str) -> int:
     return len(LEADER_RE.sub(" ", text).strip())
 
 
-def ocr_covers_embedded(embedded: str, ocr: str) -> bool:
+def ocr_covers_embedded(
+    embedded: str, ocr: str, *, compare_words: bool = True
+) -> bool:
     """Is the OCR read a plausible transcription of the same page?
 
     A vision model can drop half a page or invent fluent text, and neither
     shows up in a quality score: invented Arabic scores well. The embedded
-    layer, even with broken glyph mapping, still preserves the words. So OCR
-    is only allowed to replace substantial embedded text when it keeps roughly
-    the same length and most of the same words.
+    layer of a digital page supplies a reference for length and word overlap.
+    A full-page scan can carry a previous OCR layer with completely wrong
+    letters. Callers disable word comparison for those scans, while keeping
+    the length check to catch substantial truncation.
     """
     if len(embedded.strip()) < MIN_COMPARABLE_TEXT:
         return True
     if _comparable_length(ocr) < _comparable_length(embedded) * MIN_LENGTH_RATIO:
         return False
-    return word_overlap(embedded, ocr) >= MIN_WORD_OVERLAP
+    return not compare_words or word_overlap(embedded, ocr) >= MIN_WORD_OVERLAP
 
 
 # A word must be at least this long before its one-character-shorter form is

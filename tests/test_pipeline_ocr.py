@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import re
 import zipfile
@@ -390,6 +391,143 @@ def _text_pdf(path, lines: list[str]) -> None:
     page.insert_text((72, 72), lines, fontsize=9)
     pdf.save(path)
     pdf.close()
+
+
+_SCAN_LAYER_LINES = [
+    "A garbled previous OCR layer retains enough letters to score well.",
+    "Its words differ completely from the actual printed Arabic page.",
+    "The quality scorer cannot verify whether these letters are correct.",
+    "A full page scan should therefore be read again from its image.",
+]
+_SCAN_REREAD = "هذا نص عربي سليم لاختبار جودة استخراج الكلمات من ملف الكتاب. " * 5
+
+
+def _layered_scan_pdf(path, image_rect=None, layer_lines=None):
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    image = Image.new("RGB", (int(page.rect.width), int(page.rect.height)), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    page.insert_image(image_rect or page.rect, stream=buffer.getvalue())
+    page.insert_text(
+        (72, 72), layer_lines or _SCAN_LAYER_LINES, fontsize=9, render_mode=3
+    )
+    pdf.save(path)
+    pdf.close()
+
+
+class ScanRereadOcrProvider:
+    name = "rereader"
+
+    def __init__(self, text=_SCAN_REREAD):
+        self.text = text
+        self.calls = 0
+
+    def recognize(self, image_png, language):
+        self.calls += 1
+        return OcrResult(self.text, provider=self.name)
+
+
+def test_automatic_mode_rereads_scan_with_high_scoring_existing_ocr(tmp_path):
+    source = tmp_path / "layered-scan.pdf"
+    _layered_scan_pdf(source)
+    provider = ScanRereadOcrProvider()
+    outputs = convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(preserve_images=False, require_epubcheck=False),
+        ocr_provider=provider,
+    )
+    report = json.loads(outputs["report"].read_text())
+    page = report["page_details"][0]
+    assert provider.calls == 1
+    assert page["candidates"]["embedded_text"]["reasons"] == []
+    assert page["source"] == "ocr:rereader"
+    assert report["page_types"]["SCAN"] == 1
+    assert report["integrity"]["status"] == "passed"
+
+
+def test_scan_reread_still_blocks_truncated_ocr(tmp_path):
+    source = tmp_path / "layered-scan.pdf"
+    _layered_scan_pdf(source)
+    output = tmp_path / "output"
+    with pytest.raises(ConversionIntegrityError, match="requires review"):
+        convert(
+            source,
+            output,
+            ConversionOptions(preserve_images=False, require_epubcheck=False),
+            ocr_provider=ScanRereadOcrProvider("نص مبتور"),
+        )
+    assert not (output / "layered-scan.epub").exists()
+
+
+def test_scan_repair_does_not_warn_about_correcting_previous_ocr_spelling(tmp_path):
+    source = tmp_path / "layered-scan.pdf"
+    lines = _SCAN_LAYER_LINES + ["Repeated OCR word plannning was corrupt."]
+    _layered_scan_pdf(source, layer_lines=lines)
+    corrected = "\n".join(_SCAN_LAYER_LINES + ["Repeated OCR word planning was corrupt."])
+    outputs = convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(require_epubcheck=False),
+        ocr_provider=ScanRereadOcrProvider(corrected),
+    )
+    page = json.loads(outputs["report"].read_text())["page_details"][0]
+    assert page["source"] == "ocr:rereader"
+    assert page["warnings"] == []
+    assert "dropped_character_candidates" not in page["candidates"]["ocr:rereader"]
+
+
+def test_scan_with_failed_ocr_requires_review_even_if_layer_scores_well(tmp_path):
+    source = tmp_path / "layered-scan.pdf"
+    _layered_scan_pdf(source)
+    with pytest.raises(ConversionIntegrityError, match="requires review"):
+        convert(
+            source,
+            tmp_path / "output",
+            ConversionOptions(preserve_images=False, require_epubcheck=False),
+            ocr_provider=FailingOcrProvider(),
+        )
+
+
+def test_prefer_text_mode_can_keep_existing_scan_layer(tmp_path):
+    source = tmp_path / "layered-scan.pdf"
+    _layered_scan_pdf(source)
+    provider = ScanRereadOcrProvider()
+    outputs = convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(mode="prefer_text", require_epubcheck=False),
+        ocr_provider=provider,
+    )
+    assert provider.calls == 0
+    assert json.loads(outputs["report"].read_text())["sources"] == {"embedded_text": 1}
+
+
+def test_an_inline_figure_does_not_make_a_digital_page_a_scan(tmp_path):
+    source = tmp_path / "illustrated.pdf"
+    _layered_scan_pdf(source, pymupdf.Rect(72, 300, 200, 400))
+    provider = ScanRereadOcrProvider()
+    outputs = convert(
+        source,
+        tmp_path / "output",
+        ConversionOptions(require_epubcheck=False),
+        ocr_provider=provider,
+    )
+    assert provider.calls == 0
+    assert json.loads(outputs["report"].read_text())["sources"] == {"embedded_text": 1}
+
+
+def test_force_ocr_keeps_word_coverage_guard_on_digital_pages(tmp_path):
+    source = tmp_path / "digital.pdf"
+    _text_pdf(source, _SCAN_LAYER_LINES)
+    with pytest.raises(ConversionIntegrityError, match="requires review"):
+        convert(
+            source,
+            tmp_path / "output",
+            ConversionOptions(mode="force_ocr", require_epubcheck=False),
+            ocr_provider=ScanRereadOcrProvider(),
+        )
 
 
 def test_short_clean_page_is_not_held_back_for_review(tmp_path):

@@ -57,9 +57,17 @@ def _validate_internal(path: Path) -> None:
             for name in names:
                 if name.endswith((".xml", ".opf", ".xhtml", ".svg")):
                     try:
-                        ElementTree.fromstring(archive.read(name))
+                        tree = ElementTree.fromstring(archive.read(name))
                     except ElementTree.ParseError as exc:
                         errors.append(f"{name} is not valid XML: {exc}")
+                        continue
+                    seen_ids: set[str] = set()
+                    for element in tree.iter():
+                        identifier = element.get("id")
+                        if identifier is not None:
+                            if identifier in seen_ids:
+                                errors.append(f"{name} has duplicate ID: {identifier}")
+                            seen_ids.add(identifier)
             if "EPUB/package.opf" in names:
                 package = ElementTree.fromstring(archive.read("EPUB/package.opf"))
                 namespace = {"opf": "http://www.idpf.org/2007/opf"}
@@ -238,11 +246,14 @@ def _block_html(block, fix_bidi: bool = True, page: int = 1) -> str:
             return f'<h1 id="{anchor}">{content}</h1>'
         return f"<h{level}>{content}</h{level}>"
     if block.type == BlockType.FOOTNOTE:
-        identifier = block.footnote_id or "note"
-        return (
-            f'<aside epub:type="footnote" class="footnote" '
-            f'id="{_footnote_target(identifier, page)}">{content}</aside>'
+        # Layout detection can mark several unnumbered blocks as footnotes.
+        # They have no references to link to, so don't invent a shared target.
+        target = (
+            f' id="{_footnote_target(block.footnote_id, page)}"'
+            if block.footnote_id
+            else ""
         )
+        return f'<aside epub:type="footnote" class="footnote"{target}>{content}</aside>'
     if block.type == BlockType.POETRY:
         lines = "".join(
             f"<p>{_inline_html(line, fix_bidi, page)}</p>"

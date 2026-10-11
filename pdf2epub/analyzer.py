@@ -527,11 +527,14 @@ def analyze_pdf(
             images = page.get_images(full=True)
             page_area = max(page.rect.width * page.rect.height, 1)
             image_area = 0.0
+            full_page_scan = False
             for info in images:
                 try:
-                    image_area += sum(
-                        rect.width * rect.height for rect in page.get_image_rects(info[0])
-                    )
+                    for rect in page.get_image_rects(info[0]):
+                        image_area += rect.width * rect.height
+                        visible_rect = rect & page.rect
+                        if visible_rect.width * visible_rect.height >= page_area * 0.85:
+                            full_page_scan = True
                 except Exception:  # noqa: BLE001, S110 - malformed PDF image metadata varies
                     pass
             image_heavy = bool(images and image_area > page_area * 0.35)
@@ -564,7 +567,8 @@ def analyze_pdf(
                     options.mode == "automatic"
                     and options.ocr_bad_pages
                     and (
-                        quality.score < options.acceptable_threshold
+                        full_page_scan
+                        or quality.score < options.acceptable_threshold
                         or embedded_has_severe_issue
                         or bool(
                             BROKEN_EXTRACTION_REASONS.intersection(quality.reasons)
@@ -634,12 +638,19 @@ def analyze_pdf(
                         "metrics": ocr_metrics,
                     }
                     ocr_has_severe_issue = _has_severe_text_issue(ocr_blocks)
-                    # A quality score cannot tell a faithful read from an
-                    # invented one, so OCR must also account for the text the
-                    # page already had before it is allowed to replace it.
-                    ocr_covers_page = ocr_covers_embedded(embedded, ocr_text)
+                    # A scan's earlier OCR layer is not a spelling reference.
+                    # Retain the length guard, and compare words on digital
+                    # pages where embedded text is an independent reference.
+                    ocr_covers_page = ocr_covers_embedded(
+                        embedded, ocr_text, compare_words=not full_page_scan
+                    )
                     choose_ocr = bool(ocr_blocks) and ocr_covers_page and (
                         options.mode == "force_ocr"
+                        or (
+                            full_page_scan
+                            and not ocr_has_severe_issue
+                            and ocr_quality.score >= options.acceptable_threshold
+                        )
                         or (
                             not embedded
                             and not ocr_has_severe_issue
@@ -662,14 +673,27 @@ def analyze_pdf(
                         blocks = ocr_blocks
                         selected_quality = ocr_quality
                         source = f"ocr:{provider_name}"
-                        kind = PageType.SCAN if not embedded else PageType.BROKEN_TEXT
-                        selection = PageSelection.OCR
-                        selection_reason = (
-                            "OCR was the only usable candidate"
-                            if not embedded
-                            else "OCR passed quality checks that embedded text failed"
+                        kind = (
+                            PageType.SCAN
+                            if full_page_scan or not embedded
+                            else PageType.BROKEN_TEXT
                         )
-                        if embedded:
+                        selection = PageSelection.OCR
+                        if full_page_scan:
+                            selection_reason = (
+                                "OCR reread the full-page scan instead of its existing text layer"
+                            )
+                        elif not embedded:
+                            selection_reason = "OCR was the only usable candidate"
+                        elif options.mode == "force_ocr":
+                            selection_reason = (
+                                "OCR was explicitly requested and passed coverage checks"
+                            )
+                        else:
+                            selection_reason = (
+                                "OCR passed quality checks that embedded text failed"
+                            )
+                        if embedded and not full_page_scan:
                             dropped = dropped_character_findings(embedded, ocr_text)
                             if dropped:
                                 # Review hint only (~50% precision): the pairs

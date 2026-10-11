@@ -23,6 +23,8 @@ OCR_PROMPT = """You are an OCR engine for printed Arabic books. Transcribe the p
 Rules:
 - Output ONLY the page text. No preamble, no explanations, no translation, no commentary.
 - Keep the text in Arabic, right-to-left, exactly as written. Preserve diacritics (تشكيل), punctuation, and Qur'anic/verse markers as printed.
+- Copy original spelling and diacritics exactly; do not add diacritics or improve grammar.
+- Use only alphabets printed on the page. Never substitute Hebrew or other letters for Arabic. Check personal names and similar-looking letters against the image.
 - Preserve paragraph breaks: one blank line between paragraphs. Do not merge or split paragraphs.
 - Mark headings by prefixing with "# " (chapter) or "## " (section).
 - Footnotes: in the body put the marker as [^N]; list footnote texts at the end of the page as "[^N]: text".
@@ -32,6 +34,7 @@ Rules:
 MAX_PROVIDER_RESPONSE_BYTES = 8 * 1024 * 1024
 OLLAMA_IMAGE_LONG_SIDE = 1280
 OLLAMA_IMAGE_ABSOLUTE_LIMIT = 1472
+HOSTED_IMAGE_LONG_SIDE = 1568
 OLLAMA_MAX_RETRIES = 3
 OLLAMA_RETRY_DELAY_SECONDS = 10
 _OLLAMA_REQUEST_LOCK = threading.Lock()
@@ -194,7 +197,10 @@ def _clean_model_text(text: str) -> str:
     return normalize_arabic(text)
 
 
-def _prepare_vision_image(image_bytes: bytes) -> bytes:
+def _prepare_vision_image(
+    image_bytes: bytes,
+    max_long_side: int = min(OLLAMA_IMAGE_LONG_SIDE, OLLAMA_IMAGE_ABSOLUTE_LIMIT),
+) -> bytes:
     """Bound vision tokens by resizing and normalizing a page before upload."""
     try:
         from PIL import Image, ImageOps
@@ -203,8 +209,7 @@ def _prepare_vision_image(image_bytes: bytes) -> bytes:
     try:
         with Image.open(io.BytesIO(image_bytes)) as source:
             image = ImageOps.exif_transpose(source).convert("L")
-            target = min(OLLAMA_IMAGE_LONG_SIDE, OLLAMA_IMAGE_ABSOLUTE_LIMIT)
-            image.thumbnail((target, target), Image.Resampling.LANCZOS)
+            image.thumbnail((max_long_side, max_long_side), Image.Resampling.LANCZOS)
             output = io.BytesIO()
             image.save(output, format="JPEG", quality=87, optimize=True)
             return output.getvalue()
@@ -242,6 +247,12 @@ def _post_json(
                 raise OcrError("OCR provider response exceeded the 8 MB limit")
             data = json.loads(body)
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise OcrError(
+                "OCR provider returned HTTP 401 (authentication rejected). "
+                "Check the configured API key; when using a proxy, also check "
+                "its upstream credentials."
+            ) from exc
         if 500 <= exc.code <= 599:
             raise OcrTransientError(
                 f"OCR provider returned HTTP {exc.code}"
@@ -461,15 +472,17 @@ class OpenAiCompatibleVisionOcrProvider:
     prompt: str = OCR_PROMPT
 
     def recognize(self, image_png: bytes, language: str) -> OcrResult:
-        encoded = base64.b64encode(_prepare_vision_image(image_png)).decode("ascii")
+        del language
+        encoded = base64.b64encode(
+            _prepare_vision_image(image_png, HOSTED_IMAGE_LONG_SIDE)
+        ).decode("ascii")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        started = time.monotonic()
         data = _post_json(
             f"{self.base_url.rstrip('/')}/chat/completions",
             {
                 "model": self.model,
-                "temperature": 0,
-                "max_tokens": 3000,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "max_tokens": 8192,
                 "messages": [
                     {"role": "system", "content": self.prompt},
                     {
@@ -489,14 +502,36 @@ class OpenAiCompatibleVisionOcrProvider:
             self.timeout,
         )
         try:
-            text = _message_text(data["choices"][0]["message"]["content"])
+            choice = data["choices"][0]
+            text = _message_text(choice["message"]["content"])
         except (KeyError, IndexError, TypeError) as exc:
             raise OcrError(
                 "Vision API response did not contain choices[0].message.content"
             ) from exc
         if not text.strip():
             raise OcrError("Vision API returned an empty OCR result")
-        return OcrResult(_clean_model_text(str(text)), provider=self.name)
+        if choice.get("finish_reason") == "length":
+            raise OcrError("Vision API exhausted its token budget; OCR may be truncated")
+        usage = data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens")
+        output_tokens = usage.get("completion_tokens")
+        duration = round(time.monotonic() - started, 3)
+        metrics = {
+            "model": self.model,
+            "prompt_eval_count": prompt_tokens,
+            "eval_count": output_tokens,
+            "duration_seconds": duration,
+            "retries": 0,
+        }
+        return OcrResult(
+            _clean_model_text(str(text)),
+            provider=self.name,
+            model=self.model,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            duration_seconds=duration,
+            attempts=[metrics],
+        )
 
 
 @dataclass(slots=True)

@@ -13,6 +13,7 @@ from pdf2epub.ocr import (
     OLLAMA_QUALITY_MODEL,
     MistralDocumentOcrProvider,
     OcrConfigurationError,
+    OcrError,
     OcrSettings,
     OllamaVisionOcrProvider,
     OpenAiCompatibleVisionOcrProvider,
@@ -201,9 +202,53 @@ def test_openai_compatible_sends_data_url(monkeypatch):
     assert captured["body"]["messages"][0]["role"] == "system"
     image_url = captured["body"]["messages"][1]["content"][0]["image_url"]["url"]
     assert image_url.startswith("data:image/jpeg;base64,")
-    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert captured["body"]["max_tokens"] == 8192
+    assert "chat_template_kwargs" not in captured["body"]
+    assert "temperature" not in captured["body"]
     assert captured["auth"] == "Bearer secret"
     assert result.text == "نص"
+
+
+def test_openai_compatible_reports_real_inference_usage(monkeypatch):
+    def fake_open(request, timeout):
+        return FakeResponse(
+            {
+                "model": "claude-sonnet-5-5",
+                "choices": [
+                    {"message": {"content": "نص الصفحة"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1748, "completion_tokens": 459},
+            }
+        )
+
+    monkeypatch.setattr("pdf2epub.ocr.urllib.request.urlopen", fake_open)
+    provider = OpenAiCompatibleVisionOcrProvider(
+        "https://proxy.example/v1", "api-supplementary/claude-sonnet-5-5", "secret"
+    )
+    result = provider.recognize(image_bytes((100, 100)), "ara")
+    assert result.model == "api-supplementary/claude-sonnet-5-5"
+    assert result.prompt_tokens == 1748
+    assert result.output_tokens == 459
+    assert result.duration_seconds >= 0
+    assert result.attempts[0]["eval_count"] == 459
+
+
+def test_openai_compatible_refuses_a_truncated_completion(monkeypatch):
+    monkeypatch.setattr(
+        "pdf2epub.ocr.urllib.request.urlopen",
+        lambda request, timeout: FakeResponse(
+            {
+                "choices": [
+                    {"message": {"content": "نص ناقص"}, "finish_reason": "length"}
+                ]
+            }
+        ),
+    )
+    provider = OpenAiCompatibleVisionOcrProvider(
+        "https://proxy.example/v1", "api-supplementary/claude-sonnet-5-5", "secret"
+    )
+    with pytest.raises(OcrError, match="truncated"):
+        provider.recognize(image_bytes((100, 100)), "ara")
 
 
 def test_openai_prompt_override_is_sent(monkeypatch):
@@ -222,6 +267,30 @@ def test_openai_prompt_override_is_sent(monkeypatch):
         "role": "system",
         "content": "PROBE PROMPT",
     }
+
+
+def test_authentication_error_explains_key_and_proxy_checks_without_leaking_secrets(
+    monkeypatch,
+):
+    def unauthorized(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "rejected secret",
+            {},
+            io.BytesIO(b'{"error":"rejected secret"}'),
+        )
+
+    monkeypatch.setattr("pdf2epub.ocr.urllib.request.urlopen", unauthorized)
+    provider = OpenAiCompatibleVisionOcrProvider(
+        "https://proxy.example/v1", "vision-model", "secret"
+    )
+    with pytest.raises(OcrError, match="HTTP 401") as caught:
+        provider.recognize(image_bytes((100, 100)), "ara")
+    message = str(caught.value)
+    assert "API key" in message
+    assert "upstream credentials" in message
+    assert "secret" not in message
 
 
 def test_hosted_provider_requires_server_configuration():

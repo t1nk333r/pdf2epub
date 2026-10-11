@@ -111,6 +111,16 @@ def test_short_pages_are_not_subject_to_the_coverage_gate():
     assert ocr_covers_embedded("عنوان", "عنوان الصفحة الكامل بعد المسح الضوئي")
 
 
+def test_scan_coverage_can_ignore_a_corrupted_previous_ocr_layer():
+    from pdf2epub.text import ocr_covers_embedded
+
+    embedded = "ال!ب الم!لمين ال!لحاد مخ!جقا ت!ليك ما!ر ؤخا!ق " * 8
+    reread = "هذا نص عربي سليم لاختبار جودة استخراج الكلمات من ملف الكتاب. " * 6
+    assert not ocr_covers_embedded(embedded, reread)
+    assert ocr_covers_embedded(embedded, reread, compare_words=False)
+    assert not ocr_covers_embedded(embedded, "نص مبتور", compare_words=False)
+
+
 def test_plain_lam_alef_transposition_is_detected():
     # "الانتخاب" arrives as "االنتخاب" when the ligature comes back reversed.
     quality = evaluate_text("االنتخاب الطبيعي في العالم الحي")
