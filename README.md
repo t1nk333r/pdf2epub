@@ -119,13 +119,13 @@ than only `127.0.0.1`. API keys entered through the cog are intentionally lost
 when the container restarts; put persistent secrets in the local `.env` file,
 which is excluded from the image and Git.
 
-### Jenkins
+### CI
 
-The included `Jenkinsfile` validates the Compose configuration, runs the tests
-and Ruff under Python 3.14 with a bounded stage timeout, builds a tagged Docker
-image, verifies EPUBCheck and the Arabic/English Tesseract languages, and runs
-the container health check. The Jenkins agent needs Docker with Compose v2 and
-permission to access the Docker daemon.
+GitHub Actions (`.github/workflows/ci.yml`) validates the Compose
+configuration, runs the tests and Ruff under Python 3.14 with a bounded job
+timeout, builds the Docker image, verifies EPUBCheck and the Arabic/English
+Tesseract languages, and runs the container health check. The test job
+installs the image's pinned EPUBCheck, which one test needs on `PATH`.
 
 ## OCR providers
 
