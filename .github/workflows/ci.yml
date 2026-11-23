@@ -1,0 +1,97 @@
+# Tests, compose render, image build + runtime checks + smoke. Replaces the
+# Jenkinsfile. Nothing is published: the image is only built to prove it works.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: arabic-pdf2epub:ci
+
+jobs:
+  test:
+    name: Tests (Python 3.14)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install EPUBCheck
+        # test_web's resume-after-publication-failure test needs a working
+        # epubcheck on PATH. Same pinned version and checksum as the image.
+        run: |
+          set -eu
+          VERSION="$(sed -n 's/^ARG EPUBCHECK_VERSION=//p' Dockerfile)"
+          SHA256="$(sed -n 's/^ARG EPUBCHECK_SHA256=//p' Dockerfile)"
+          curl -fsSL -o /tmp/epubcheck.zip \
+            "https://github.com/w3c/epubcheck/releases/download/v${VERSION}/epubcheck-${VERSION}.zip"
+          echo "${SHA256}  /tmp/epubcheck.zip" | sha256sum -c -
+          sudo mkdir -p /opt/epubcheck
+          sudo unzip -q /tmp/epubcheck.zip -d /opt/epubcheck
+          sudo install -m 0755 docker/epubcheck /usr/local/bin/epubcheck
+          epubcheck --version
+
+      - run: pip install '.[dev]'
+      - run: pytest -q -p no:cacheprovider
+      - run: ruff check .
+
+  compose:
+    name: compose.yaml render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker compose config -q
+
+  image:
+    name: Image (build, runtime tools, smoke)
+    needs: [test, compose]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build --pull --tag "$IMAGE" .
+
+      - name: Verify runtime tools
+        run: |
+          set -eu
+          docker run --rm "$IMAGE" epubcheck --version
+          languages="$(docker run --rm "$IMAGE" tesseract --list-langs 2>&1)"
+          printf '%s\n' "$languages"
+          printf '%s\n' "$languages" | grep -qx ara
+          printf '%s\n' "$languages" | grep -qx eng
+
+      - name: Smoke test
+        # /api/health must answer ok with EPUBCheck available.
+        run: |
+          set -eu
+          name="pdf2epub-ci-${GITHUB_RUN_ID}"
+          trap 'docker stop "$name" >/dev/null 2>&1 || true' EXIT
+          docker run --rm -d --name "$name" "$IMAGE"
+          attempt=0
+          until docker exec "$name" python -c \
+            "import json, urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); assert r['status'] == 'ok' and r['epubcheck_available']"; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 15 ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "ok: /api/health reports ok with EPUBCheck available"
